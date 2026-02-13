@@ -1,0 +1,5 @@
+{"id": "doc_001", "type": "requirement", "title": "User Authentication", "content": "System shall support user login with email and password", "priority": "high"}
+{"id": "doc_002", "type": "requirement", "title": "Account Management", "content": "Users can create accounts and manage profiles", "priority": "high"}
+{"id": "doc_003", "type": "requirement", "title": "Data Export", "content": "System shall support exporting user data in CSV format", "priority": "medium"}
+{"id": "doc_004", "type": "rule", "title": "Password Policy", "content": "Passwords must be at least 8 characters with uppercase, lowercase, and numbers", "priority": "high"}
+{"id": "doc_005", "type": "constraint", "title": "Performance", "content": "All API endpoints must respond within 500ms", "priority": "high"}

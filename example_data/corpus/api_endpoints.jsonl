@@ -1,0 +1,8 @@
+{"row": 1, "endpoint": "/auth/login", "method": "POST", "description": "Authenticate user with email and password", "contentType": "application/json", "successStatus": 200, "errorStatus": 401}
+{"row": 2, "endpoint": "/auth/register", "method": "POST", "description": "Register new user account", "contentType": "application/json", "successStatus": 201, "errorStatus": 400}
+{"row": 3, "endpoint": "/auth/mfa/enroll", "method": "POST", "description": "Enroll user in MFA", "contentType": "application/json", "successStatus": 200, "errorStatus": 400}
+{"row": 4, "endpoint": "/auth/token/refresh", "method": "POST", "description": "Refresh access token", "contentType": "application/json", "successStatus": 200, "errorStatus": 401}
+{"row": 5, "endpoint": "/auth/logout", "method": "POST", "description": "Logout user and revoke session", "contentType": "application/json", "successStatus": 204, "errorStatus": 401}
+{"row": 6, "endpoint": "/auth/me", "method": "GET", "description": "Get current user profile", "contentType": "application/json", "successStatus": 200, "errorStatus": 401}
+{"row": 7, "endpoint": "/auth/roles", "method": "GET", "description": "List available roles", "contentType": "application/json", "successStatus": 200, "errorStatus": 403}
+{"row": 8, "endpoint": "/auth/roles/{roleId}/permissions", "method": "GET", "description": "Get permissions for role", "contentType": "application/json", "successStatus": 200, "errorStatus": 404}
