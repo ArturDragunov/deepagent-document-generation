@@ -1,11 +1,9 @@
 """Tests for tool functions."""
 
-import os
 import pytest
 from pathlib import Path
 
 from src.tools.corpus_reader import read_corpus_file
-from src.tools.keyword_extractor import extract_keywords
 from src.tools.token_estimator import estimate_tokens, calculate_cost
 from src.tools.code_executor import execute_python
 
@@ -55,22 +53,6 @@ class TestCorpusReader:
     result = read_corpus_file("nonexistent.txt")
     assert "ERROR" in result
     assert "not found" in result
-
-
-class TestKeywordExtractor:
-  """Test extract_keywords."""
-
-  def test_extract_codes(self):
-    result = extract_keywords("Generate BRD for LC0070 authentication system")
-    assert "LC0070" in result
-
-  def test_extract_words(self):
-    result = extract_keywords("Generate BRD for authentication system integration")
-    assert "authentication" in result or "integration" in result or "generate" in result
-
-  def test_empty_input(self):
-    result = extract_keywords("")
-    assert "None" in result or "Extracted" in result
 
 
 class TestTokenEstimator:

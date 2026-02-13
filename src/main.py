@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -80,6 +81,29 @@ Examples:
       execution_time=round(result.execution_time_sec, 2),
       messages=len(result.all_messages),
     )
+    summary = result.token_summary or {}
+    logger.info(
+      "token_summary",
+      total_input_tokens=summary.get("total_input_tokens", 0),
+      total_output_tokens=summary.get("total_output_tokens", 0),
+      total_cost_estimate=summary.get("total_cost_estimate", 0),
+    )
+
+    report = {
+      "tokens_used": summary.get("total_estimated_tokens", 0),
+      "cost_estimate": summary.get("total_cost_estimate", 0),
+      "files_included": corpus_files,
+      "warnings": result.warnings,
+      "execution_id": result.execution_id,
+      "status": result.status.value,
+      "execution_time_sec": round(result.execution_time_sec, 2),
+    }
+    report_path = output_dir / "brd_report.json"
+    try:
+      report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+      logger.info("report_written", path=str(report_path))
+    except Exception as e:
+      logger.warning("report_write_failed", path=str(report_path), error=str(e))
 
     if result.warnings:
       for w in result.warnings:

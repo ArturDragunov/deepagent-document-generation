@@ -2,11 +2,10 @@
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-from src.config import reset_config, get_config
+from src.config import reset_config
 from src.guardrails import reset_input_guardrail
 
 
@@ -24,15 +23,6 @@ def reset_singletons():
   reset_config()
   reset_input_guardrail()
   yield
-
-
-@pytest.fixture
-def test_config(monkeypatch):
-  """Config with test-friendly defaults."""
-  monkeypatch.setenv("LLM_MODEL", "openai:gpt-4")
-  monkeypatch.setenv("CORPUS_DIR", "example_data/corpus")
-  monkeypatch.setenv("OUTPUT_DIR", "outputs")
-  return get_config()
 
 
 @pytest.fixture

@@ -20,7 +20,8 @@ class Config:
 
   def __post_init__(self):
     if not Config._env_loaded:
-      load_dotenv()
+      load_dotenv()  # .env
+      load_dotenv(".env.local")  # local overrides (e.g. API keys, LLM_MODEL)
       Config._env_loaded = True
 
   # =================================================================
@@ -54,6 +55,21 @@ class Config:
     return path
 
   @property
+  def file_group_delimiter(self) -> str:
+    """Delimiter for grouping files by workbook (e.g. '_sheet' -> workbook_A_sheet1.jsonl + workbook_A_sheet2.jsonl)."""
+    return os.getenv("FILE_GROUP_DELIMITER", "_sheet")
+
+  @property
+  def max_files_per_group(self) -> int:
+    """Max files per run; groups larger than this are split (e.g. 20 sheets in one workbook -> 3 runs of 8)."""
+    return int(os.getenv("MAX_FILES_PER_GROUP", "8"))
+
+  @property
+  def consolidate_sections(self) -> bool:
+    """If True, after batch runs run one short consolidation step with golden BRD to produce one coherent doc."""
+    return os.getenv("CONSOLIDATE_SECTIONS", "true").lower() == "true"
+
+  @property
   def golden_brd_path(self) -> Path:
     return Path(os.getenv("GOLDEN_BRD_PATH", "example_data/golden_brd.md"))
 
@@ -68,6 +84,10 @@ class Config:
   @property
   def agent_timeout_sec(self) -> int:
     return int(os.getenv("AGENT_TIMEOUT_SEC", "300"))
+
+  @property
+  def reviewer_timeout_sec(self) -> int:
+    return int(os.getenv("REVIEWER_TIMEOUT_SEC", "600"))
 
   @property
   def max_retries(self) -> int:

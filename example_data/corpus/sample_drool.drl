@@ -1,70 +1,103 @@
-package com.example.rules.lc0070
+package com.example.payment.authorization
 
 import com.example.model.Transaction
-import com.example.model.ValidationResult
+import com.example.model.AuthorizationResult
+import com.example.model.RiskScore
 
 // LC0070 - Payment Authorization Rules
-// Business logic for payment transaction authorization
 
-rule "LC0070-001 Validate Transaction Amount"
+rule "LC0070-AUTH-001: Validate transaction amount limits"
   salience 100
   when
-    $tx : Transaction(amount > 0, currency != null)
+    $tx : Transaction(
+      amount > 0,
+      amount <= 999999999,
+      currency != null
+    )
   then
     $tx.setValidationStatus("AMOUNT_VALID");
     update($tx);
 end
 
-rule "LC0070-002 High Value Transaction Flag"
+rule "LC0070-AUTH-002: Block sanctioned country transactions"
   salience 90
   when
-    $tx : Transaction(amount > 10000, validationStatus == "AMOUNT_VALID")
+    $tx : Transaction(
+      destinationCountry memberOf sanctionedCountries
+    )
   then
-    $tx.setRequiresManualReview(true);
-    $tx.addFlag("HIGH_VALUE");
-    update($tx);
+    $tx.setAuthorizationStatus("BLOCKED");
+    $tx.setBlockReason("SANCTIONED_COUNTRY");
+    insert(new AuthorizationResult($tx.getId(), "DENIED", "Sanctioned country"));
 end
 
-rule "LC0070-003 Currency Conversion Required"
+rule "LC0070-AUTH-003: High value transaction requires additional verification"
   salience 80
   when
     $tx : Transaction(
-      sourceCurrency != null,
-      targetCurrency != null,
-      sourceCurrency != targetCurrency
+      amount > 50000,
+      authorizationStatus != "BLOCKED"
     )
   then
-    $tx.setRequiresCurrencyConversion(true);
-    $tx.addFlag("FX_REQUIRED");
+    $tx.setRequiresAdditionalVerification(true);
+    $tx.setVerificationType("MANUAL_REVIEW");
     update($tx);
 end
 
-rule "LC0070-004 Duplicate Transaction Check"
+rule "LC0070-AUTH-004: Calculate risk score"
   salience 70
   when
-    $tx : Transaction(transactionId != null)
-    $existing : Transaction(
-      transactionId == $tx.transactionId,
-      this != $tx,
-      status == "COMPLETED"
+    $tx : Transaction(
+      authorizationStatus != "BLOCKED",
+      riskScore == null
     )
   then
-    $tx.setValidationStatus("DUPLICATE_DETECTED");
-    $tx.addFlag("POSSIBLE_DUPLICATE");
+    RiskScore score = new RiskScore();
+    score.setTransactionId($tx.getId());
+    score.calculate($tx.getAmount(), $tx.getDestinationCountry(), $tx.getSenderBic());
+    $tx.setRiskScore(score);
     update($tx);
 end
 
-rule "LC0070-005 Sanctioned Country Check"
-  salience 95
+rule "LC0070-AUTH-005: Auto-approve low-risk transactions"
+  salience 60
   when
-    $tx : Transaction(destinationCountry != null)
-    $result : ValidationResult(
-      countryCode == $tx.destinationCountry,
-      sanctioned == true
+    $tx : Transaction(
+      authorizationStatus != "BLOCKED",
+      riskScore != null,
+      riskScore.value < 30,
+      amount <= 50000
     )
   then
-    $tx.setValidationStatus("BLOCKED");
-    $tx.addFlag("SANCTIONED_DESTINATION");
-    $tx.setBlockReason("Destination country is sanctioned");
-    update($tx);
+    $tx.setAuthorizationStatus("APPROVED");
+    insert(new AuthorizationResult($tx.getId(), "APPROVED", "Auto-approved: low risk"));
+end
+
+rule "LC0070-AUTH-006: Escalate medium-risk transactions"
+  salience 50
+  when
+    $tx : Transaction(
+      authorizationStatus != "BLOCKED",
+      authorizationStatus != "APPROVED",
+      riskScore != null,
+      riskScore.value >= 30,
+      riskScore.value < 70
+    )
+  then
+    $tx.setAuthorizationStatus("ESCALATED");
+    $tx.setEscalationReason("Medium risk score: " + $tx.getRiskScore().getValue());
+    insert(new AuthorizationResult($tx.getId(), "ESCALATED", "Medium risk - manual review required"));
+end
+
+rule "LC0070-AUTH-007: Deny high-risk transactions"
+  salience 40
+  when
+    $tx : Transaction(
+      authorizationStatus != "BLOCKED",
+      riskScore != null,
+      riskScore.value >= 70
+    )
+  then
+    $tx.setAuthorizationStatus("DENIED");
+    insert(new AuthorizationResult($tx.getId(), "DENIED", "High risk score: " + $tx.getRiskScore().getValue()));
 end

@@ -2,6 +2,10 @@
 
 Supports: JSONL, JSON, CSV, Excel, PDF, Word (.docx), Drools (.drl),
 Markdown, and plain text. All functions are synchronous (deepagents requirement).
+
+NO artificial truncation -- returns full file content. The only hard limit
+is MAX_FILE_SIZE_MB from config (default 50MB) which prevents accidentally
+loading huge binary files.
 """
 
 import json
@@ -14,7 +18,7 @@ from src.config import get_config
 
 
 def read_corpus_file(file_path: str, max_lines: Optional[int] = None) -> str:
-  """Read a file from the corpus directory and return its content as formatted text.
+  """Read a file from the corpus directory and return its FULL content.
 
   Supports JSONL, JSON, CSV, Excel (.xlsx), PDF, Word (.docx), Drools (.drl),
   Markdown (.md), and plain text formats. For structured formats, returns a
@@ -22,7 +26,7 @@ def read_corpus_file(file_path: str, max_lines: Optional[int] = None) -> str:
 
   Args:
       file_path: Path to file relative to corpus directory (e.g. 'drools/LC0070.drl')
-      max_lines: Maximum lines/rows to return for large files. Defaults to 50.
+      max_lines: Optional max lines/rows for tabular data. None = no limit (all rows).
 
   Returns:
       File content as formatted string, or error message if file cannot be read.
@@ -43,7 +47,6 @@ def read_corpus_file(file_path: str, max_lines: Optional[int] = None) -> str:
       f"max {config.max_file_size_mb}MB)"
     )
 
-  max_lines = max_lines or 50
   suffix = full_path.suffix.lower()
 
   try:
@@ -68,34 +71,39 @@ def read_corpus_file(file_path: str, max_lines: Optional[int] = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Internal format readers
+# Internal format readers -- no artificial truncation
 # ---------------------------------------------------------------------------
 
-def _read_jsonl(path: Path, max_rows: int = 50) -> str:
+def _read_jsonl(path: Path, max_rows: Optional[int] = None) -> str:
   try:
     df = pl.read_ndjson(str(path))
   except Exception:
     # Fallback: read line-by-line as raw JSON objects
     lines = path.read_text(encoding="utf-8").strip().splitlines()
     rows = len(lines)
-    preview = lines[:max_rows]
-    content = f"JSONL File: {path.name} ({rows} lines)\n"
-    for line in preview:
-      content += line + "\n"
-    if rows > max_rows:
+    if max_rows and rows > max_rows:
+      preview = lines[:max_rows]
+      content = f"JSONL File: {path.name} ({rows} lines, showing {max_rows})\n"
+      for line in preview:
+        content += line + "\n"
       content += f"... ({rows - max_rows} more lines)\n"
+    else:
+      content = f"JSONL File: {path.name} ({rows} lines)\n"
+      for line in lines:
+        content += line + "\n"
     return content
 
   rows = len(df)
   cols = df.columns
-  if rows > max_rows:
-    df = df.head(max_rows)
-
-  content = f"JSONL File: {path.name}\n"
-  content += f"Rows: {rows}, Columns: {', '.join(cols)}\n"
-  content += df.write_csv()
-  if rows > max_rows:
+  if max_rows and rows > max_rows:
+    content = f"JSONL File: {path.name}\n"
+    content += f"Rows: {rows} (showing {max_rows}), Columns: {', '.join(cols)}\n"
+    content += df.head(max_rows).write_csv()
     content += f"\n... ({rows - max_rows} more rows)\n"
+  else:
+    content = f"JSONL File: {path.name}\n"
+    content += f"Rows: {rows}, Columns: {', '.join(cols)}\n"
+    content += df.write_csv()
   return content
 
 
@@ -103,36 +111,37 @@ def _read_json(path: Path) -> str:
   with open(path, "r", encoding="utf-8") as f:
     data = json.load(f)
   content = f"JSON File: {path.name}\n"
-  text = json.dumps(data, indent=2)
-  if len(text) > 8000:
-    text = text[:8000] + "\n... (truncated)"
-  content += text
+  content += json.dumps(data, indent=2)
   return content
 
 
-def _read_csv(path: Path, max_rows: int = 50) -> str:
+def _read_csv(path: Path, max_rows: Optional[int] = None) -> str:
   df = pl.read_csv(str(path))
   rows = len(df)
-  if rows > max_rows:
-    df = df.head(max_rows)
-  content = f"CSV File: {path.name}\n"
-  content += f"Rows: {rows}, Columns: {', '.join(df.columns)}\n"
-  content += df.write_csv()
-  if rows > max_rows:
+  if max_rows and rows > max_rows:
+    content = f"CSV File: {path.name}\n"
+    content += f"Rows: {rows} (showing {max_rows}), Columns: {', '.join(df.columns)}\n"
+    content += df.head(max_rows).write_csv()
     content += f"\n... ({rows - max_rows} more rows)\n"
+  else:
+    content = f"CSV File: {path.name}\n"
+    content += f"Rows: {rows}, Columns: {', '.join(df.columns)}\n"
+    content += df.write_csv()
   return content
 
 
-def _read_excel(path: Path, max_rows: int = 50) -> str:
+def _read_excel(path: Path, max_rows: Optional[int] = None) -> str:
   df = pl.read_excel(str(path))
   rows = len(df)
-  if rows > max_rows:
-    df = df.head(max_rows)
-  content = f"Excel File: {path.name}\n"
-  content += f"Rows: {rows}, Columns: {', '.join(df.columns)}\n"
-  content += df.write_csv()
-  if rows > max_rows:
+  if max_rows and rows > max_rows:
+    content = f"Excel File: {path.name}\n"
+    content += f"Rows: {rows} (showing {max_rows}), Columns: {', '.join(df.columns)}\n"
+    content += df.head(max_rows).write_csv()
     content += f"\n... ({rows - max_rows} more rows)\n"
+  else:
+    content = f"Excel File: {path.name}\n"
+    content += f"Rows: {rows}, Columns: {', '.join(df.columns)}\n"
+    content += df.write_csv()
   return content
 
 
@@ -140,16 +149,13 @@ def _read_pdf(path: Path) -> str:
   try:
     import pymupdf  # PyMuPDF
   except ImportError:
-    return f"ERROR: pymupdf not installed. Run: pip install pymupdf"
+    return "ERROR: pymupdf not installed. Run: pip install pymupdf"
 
   doc = pymupdf.open(str(path))
   content = f"PDF File: {path.name} ({len(doc)} pages)\n\n"
   for page_num, page in enumerate(doc, 1):
     text = page.get_text()
     content += f"--- Page {page_num} ---\n{text}\n"
-    if len(content) > 15000:
-      content += f"\n... (truncated at page {page_num})\n"
-      break
   doc.close()
   return content
 
@@ -165,15 +171,10 @@ def _read_word(path: Path) -> str:
   for para in doc.paragraphs:
     if para.text.strip():
       content += para.text + "\n"
-    if len(content) > 15000:
-      content += "\n... (truncated)\n"
-      break
   return content
 
 
-def _read_text(path: Path, max_chars: int = 15000) -> str:
+def _read_text(path: Path) -> str:
   with open(path, "r", encoding="utf-8") as f:
     content = f.read()
-  if len(content) > max_chars:
-    content = content[:max_chars] + "\n... (truncated)"
   return content

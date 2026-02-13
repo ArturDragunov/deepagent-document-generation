@@ -1,16 +1,18 @@
 """Async orchestrator for the 6-manager BRD generation pipeline.
 
-Architecture:
-  - 6 managers: Drool, Model, Outbound, Transformation, Inbound, Reviewer
-  - Each manager has specialized sub-agents (handled by deepagents internally)
+Architecture (simplified -- no sub-agents):
+  - 6 flat managers: Drool, Model, Outbound, Transformation, Inbound, Reviewer
   - Execution flow:
-    1. Drool + Model run IN PARALLEL (asyncio.gather)
-    2. Outbound -> Transformation -> Inbound run SEQUENTIALLY
-    3. Reviewer validates; if gaps found, requests manager reruns (max retries)
+    1. Pre-filter drool files via LLM-based filter
+    2. Drool + Model run IN PARALLEL (asyncio.gather)
+    3. Outbound -> Transformation -> Inbound run SEQUENTIALLY
+       Each step receives ALL prior outputs via file-based sharing
+    4. Reviewer validates; if gaps found, requests manager reruns (max retries)
 
+  - Agent outputs saved to files -- downstream agents read full content via
+    read_agent_output tool. NO truncation on data flow.
   - Uses ainvoke() for true async (deepagents CompiledStateGraph supports it)
-  - Structured logging via structlog
-  - Token/cost tracking per manager
+  - ExecutionLogger callback for LLM/tool call visibility
 """
 
 import asyncio
@@ -20,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.config import get_config
+from src.execution_logging import ExecutionLogger
 from src.guardrails import get_input_guardrail
 from src.logger import get_logger
 from src.models import (
@@ -28,12 +31,74 @@ from src.models import (
   AgentMessage,
   MessageStatus,
   AgentType,
-  TokenTracker,
   ReprocessRequest,
 )
 from src.agents.agent_definitions import create_all_managers
+from src.tools.drool_filter import filter_drool_files
+from src.tools.agent_output import save_agent_output, clear_agent_outputs
 
 logger = get_logger(__name__)
+
+
+def group_files_by_workbook(
+  files: List[str],
+  delimiter: str,
+  max_per_group: Optional[int] = None,
+) -> List[List[str]]:
+  """Group file paths by workbook key (prefix before delimiter). Split groups larger than max_per_group."""
+  if not files:
+    return []
+  if not delimiter:
+    flat = [[f] for f in files]
+    if max_per_group and max_per_group > 0:
+      return _chunk_groups(flat, max_per_group)
+    return flat
+  groups: Dict[Tuple[str, str], List[str]] = {}
+  for path in files:
+    p = Path(path)
+    parent = str(p.parent) if p.parent != Path(".") else ""
+    name = p.name
+    if delimiter in name:
+      key = (parent, name.split(delimiter)[0])
+    else:
+      key = (parent, name)
+    groups.setdefault(key, []).append(path)
+  ordered = sorted(groups.items(), key=lambda x: x[0])
+  result: List[List[str]] = [g for _, g in ordered]
+  if max_per_group and max_per_group > 0:
+    result = _chunk_groups(result, max_per_group)
+  return result
+
+
+def _chunk_groups(groups: List[List[str]], max_per: int) -> List[List[str]]:
+  """Split any group with more than max_per files into chunks of max_per."""
+  out: List[List[str]] = []
+  for g in groups:
+    if len(g) <= max_per:
+      out.append(g)
+    else:
+      for i in range(0, len(g), max_per):
+        out.append(g[i : i + max_per])
+  return out
+
+
+def _message_content_to_str(raw: Any) -> str:
+  """Normalize AIMessage/last message content to str (content can be list of blocks)."""
+  if raw is None:
+    return ""
+  if isinstance(raw, str):
+    return raw
+  if isinstance(raw, list):
+    parts = []
+    for block in raw:
+      if isinstance(block, str):
+        parts.append(block)
+      elif isinstance(block, dict) and "text" in block:
+        parts.append(block["text"])
+      else:
+        parts.append(str(block))
+    return "\n".join(parts)
+  return str(raw)
 
 
 class BRDOrchestrator:
@@ -44,6 +109,10 @@ class BRDOrchestrator:
     self.guardrail = get_input_guardrail()
     self.managers: Dict[str, Any] = {}
     self.context: Optional[ExecutionContext] = None
+    self._drool_files: List[str] = []
+    self._non_drool_files: List[str] = []
+    self._completed_agents: List[str] = []
+    self._golden_brd_path: Optional[Path] = None
 
     logger.info(
       "orchestrator_initialized",
@@ -58,17 +127,7 @@ class BRDOrchestrator:
     golden_brd_path: Optional[Path] = None,
     output_dir: Optional[Path] = None,
   ) -> ExecutionResult:
-    """Run the full BRD generation pipeline.
-
-    Args:
-        user_query: User's input query.
-        corpus_files: List of corpus file paths (relative to corpus dir).
-        golden_brd_path: Optional path to golden BRD reference.
-        output_dir: Output directory for results.
-
-    Returns:
-        ExecutionResult with status, messages, tokens, and metadata.
-    """
+    """Run the full BRD generation pipeline."""
     # Validate input
     is_valid, violations = self.guardrail.validate_input(user_query)
     if not is_valid:
@@ -93,6 +152,16 @@ class BRDOrchestrator:
       execution_id=str(uuid.uuid4()),
     )
 
+    # Clear previous agent outputs
+    clear_agent_outputs()
+    self._completed_agents = []
+
+    # Categorize files: drool (.drl) vs non-drool
+    self._drool_files = [f for f in corpus_files if f.endswith(".drl")]
+    self._non_drool_files = [f for f in corpus_files if not f.endswith(".drl")]
+
+    self._golden_brd_path = golden_brd_path if golden_brd_path is not None else self.config.golden_brd_path
+
     # Create all managers
     self.managers = create_all_managers(
       model=self.config.llm_model,
@@ -102,28 +171,33 @@ class BRDOrchestrator:
     logger.info(
       "pipeline_started",
       execution_id=self.context.execution_id,
-      query=user_query[:200],
+      query=user_query,
       corpus_files=len(corpus_files),
+      drool_files=len(self._drool_files),
+      non_drool_files=len(self._non_drool_files),
       model=self.config.llm_model,
     )
 
     try:
-      # Phase 1: Drool + Model in parallel
-      logger.info("phase_1_parallel", agents=["drool", "model"])
-      drool_msg, model_msg = await self._run_parallel_phase()
-      self._record_message(drool_msg, "drool")
-      self._record_message(model_msg, "model")
+      # Phase 0: Pre-filter drool files via LLM
+      filtered_drool = await self._filter_drool_files(user_query)
 
-      # Phase 2: Sequential cascade
+      # Phase 1: Drool + Model in parallel (Model runs per workbook group)
+      logger.info("phase_1_parallel", agents=["drool", "model"])
+      drool_msg, model_msg = await self._run_parallel_phase(filtered_drool)
+      self._record_and_save(drool_msg, "drool")
+      # Model output already saved and messages added by _run_manager_grouped
+
+      # Phase 2: Sequential cascade -- each runs per workbook group, merges markdown
       logger.info("phase_2_sequential", agents=["outbound", "transformation", "inbound"])
       for name in ["outbound", "transformation", "inbound"]:
-        msg = await self._execute_manager(name)
-        self._record_message(msg, name)
+        logger.info("phase_2_step", manager=name)
+        await self._run_manager_grouped(name, self._non_drool_files)
 
       # Phase 3: Reviewer with feedback loop
       logger.info("phase_3_reviewer")
       reviewer_msg = await self._run_reviewer_loop()
-      self._record_message(reviewer_msg, "reviewer")
+      self._record_and_save(reviewer_msg, "reviewer")
 
       # Finalize
       elapsed = self.context.get_elapsed_time_sec()
@@ -156,19 +230,118 @@ class BRDOrchestrator:
       )
 
   # ------------------------------------------------------------------
+  # Drool file filtering
+  # ------------------------------------------------------------------
+
+  async def _filter_drool_files(self, user_query: str) -> List[str]:
+    """Pre-filter drool files using LLM-based relevance check."""
+    if not self._drool_files:
+      logger.info("drool_filter_skip", reason="no .drl files in corpus")
+      return []
+
+    logger.info("drool_filter_start", files=len(self._drool_files))
+    result = await filter_drool_files(user_query, self._drool_files)
+    filtered = result.get("included", [])
+    logger.info(
+      "drool_filter_done",
+      included=len(filtered),
+      excluded=len(result.get("excluded", [])),
+    )
+    return filtered
+
+  # ------------------------------------------------------------------
   # Phase execution
   # ------------------------------------------------------------------
 
+  async def _run_manager_grouped(
+    self, name: str, files: List[str],
+  ) -> Optional[AgentMessage]:
+    """Run a manager per workbook group (capped size); merge markdown; optionally consolidate with golden BRD."""
+    groups = group_files_by_workbook(
+      files,
+      self.config.file_group_delimiter,
+      max_per_group=self.config.max_files_per_group,
+    )
+    accumulated: List[str] = []
+    last_msg: Optional[AgentMessage] = None
+    for idx, group in enumerate(groups):
+      logger.info(
+        "phase_group_step",
+        manager=name,
+        group=idx + 1,
+        total_groups=len(groups),
+        files_in_group=len(group),
+      )
+      msg = await self._execute_manager(name, file_override=group)
+      if msg:
+        self.context.add_message(msg)
+        last_msg = msg
+        if msg.status == MessageStatus.SUCCESS and msg.markdown_content:
+          accumulated.append(msg.markdown_content)
+    if accumulated:
+      merged = "\n\n---\n\n".join(accumulated)
+      save_agent_output(name, merged)
+      self._completed_agents.append(name)
+      logger.info("message_recorded", agent=name, output_chars=sum(len(p) for p in accumulated))
+      if self.config.consolidate_sections and len(accumulated) > 1:
+        consolidated_msg = await self._run_consolidation(name, merged)
+        if consolidated_msg and consolidated_msg.status == MessageStatus.SUCCESS and consolidated_msg.markdown_content:
+          save_agent_output(name, consolidated_msg.markdown_content)
+          logger.info("consolidation_done", agent=name, output_chars=len(consolidated_msg.markdown_content))
+    return last_msg
+
+  def _load_golden_brd(self) -> str:
+    """Load golden BRD reference content for consolidation prompts."""
+    if not self._golden_brd_path:
+      return ""
+    p = Path(self._golden_brd_path)
+    if not p.exists():
+      logger.warning("golden_brd_not_found", path=str(p))
+      return ""
+    try:
+      return p.read_text(encoding="utf-8")
+    except Exception as e:
+      logger.warning("golden_brd_read_failed", path=str(p), error=str(e))
+      return ""
+
+  def _build_consolidation_prompt(self, name: str, merged_markdown: str, golden_brd_content: str) -> str:
+    """Build prompt for consolidation step: turn merged sections into one coherent doc using golden BRD reference."""
+    return (
+      f"USER QUERY: {self.context.user_query}\n\n"
+      "CONSOLIDATION TASK: You previously produced the following sections from batch processing. "
+      "Produce ONE coherent markdown document with:\n"
+      "- A single table of contents at the top\n"
+      "- No duplicate headers; merge or deduplicate sections as needed\n"
+      "- Consistent structure and formatting\n"
+      "- Use the golden BRD reference below for style and expected sections\n\n"
+      f"GOLDEN BRD REFERENCE:\n{golden_brd_content}\n\n"
+      "MERGED SECTIONS TO CONSOLIDATE:\n"
+      f"{merged_markdown}\n\n"
+      "Output only the consolidated markdown document, no commentary."
+    )
+
+  async def _run_consolidation(self, name: str, merged_markdown: str) -> Optional[AgentMessage]:
+    """One short run: consolidate merged sections into one coherent doc using golden BRD. No file reads."""
+    golden = self._load_golden_brd()
+    prompt = self._build_consolidation_prompt(name, merged_markdown, golden)
+    logger.info("consolidation_start", manager=name, merged_len=len(merged_markdown))
+    return await self._execute_manager(name, prebuilt_message=prompt, file_override=[])
+
   async def _run_parallel_phase(
     self,
+    filtered_drool_files: List[str],
   ) -> Tuple[Optional[AgentMessage], Optional[AgentMessage]]:
-    """Run Drool and Model in parallel via asyncio.gather."""
+    """Run Drool and Model in parallel via asyncio.gather. Model runs per workbook group."""
     try:
-      drool_msg, model_msg = await asyncio.gather(
-        self._execute_manager("drool"),
-        self._execute_manager("model"),
-        return_exceptions=False,
+      logger.info("phase_1_starting")
+      drool_future = asyncio.create_task(
+        self._execute_manager("drool", file_override=filtered_drool_files),
       )
+      model_future = asyncio.create_task(
+        self._run_manager_grouped("model", self._non_drool_files),
+      )
+      drool_msg, model_msg = await asyncio.gather(drool_future, model_future, return_exceptions=False)
+      logger.info("phase_1_done")
       return drool_msg, model_msg
     except Exception as e:
       logger.error("parallel_phase_failed", error=str(e))
@@ -202,10 +375,16 @@ class BRDOrchestrator:
   # Manager execution
   # ------------------------------------------------------------------
 
+  def _get_timeout_sec(self, name: str) -> int:
+    """Return timeout in seconds for this manager (reviewer gets longer default)."""
+    return self.config.reviewer_timeout_sec if name == "reviewer" else self.config.agent_timeout_sec
+
   async def _execute_manager(
     self,
     name: str,
     feedback: Optional[ReprocessRequest] = None,
+    file_override: Optional[List[str]] = None,
+    prebuilt_message: Optional[str] = None,
   ) -> Optional[AgentMessage]:
     """Execute a single manager agent with timeout."""
     if name not in self.managers:
@@ -214,25 +393,42 @@ class BRDOrchestrator:
 
     manager = self.managers[name]
     start = time.time()
+    timeout_sec = self._get_timeout_sec(name)
+
+    logger.info("manager_started", name=name, feedback=feedback is not None)
 
     try:
-      user_message = self._build_prompt(name, feedback)
+      user_message = prebuilt_message if prebuilt_message is not None else self._build_prompt(name, feedback, file_override)
 
-      # Use ainvoke for true async execution
+      logger.info(
+        "manager_invoking",
+        name=name,
+        timeout_sec=timeout_sec,
+        prompt_len=len(user_message),
+      )
+
+      # Use ainvoke with ExecutionLogger callback for LLM/tool visibility and token recording
+      run_config = {
+        "callbacks": [
+          ExecutionLogger(name, token_callback=lambda mn, it, ot: self._record_tokens(mn, it, ot)),
+        ],
+      }
+      inputs = {"messages": [{"role": "user", "content": user_message}]}
+
       try:
         result = await asyncio.wait_for(
-          manager.ainvoke({"messages": [{"role": "user", "content": user_message}]}),
-          timeout=self.config.agent_timeout_sec,
+          manager.ainvoke(inputs, config=run_config),
+          timeout=timeout_sec,
         )
       except asyncio.TimeoutError:
         duration = (time.time() - start) * 1000
-        logger.error("manager_timeout", name=name, timeout=self.config.agent_timeout_sec)
+        logger.error("manager_timeout", name=name, timeout=timeout_sec)
         return AgentMessage(
           agent_id=name,
           agent_type=AgentType.MANAGER,
           status=MessageStatus.TIMEOUT,
           markdown_content="",
-          metadata={"error": f"Timeout after {self.config.agent_timeout_sec}s"},
+          metadata={"error": f"Timeout after {timeout_sec}s"},
           duration_ms=duration,
         )
 
@@ -270,7 +466,7 @@ class BRDOrchestrator:
 
   @staticmethod
   def _extract_result(result: Any) -> Tuple[str, Dict[str, Any]]:
-    """Extract content and metadata from deepagents invoke result."""
+    """Extract content and metadata from deepagents ainvoke result."""
     content = ""
     metadata = {}
 
@@ -279,7 +475,10 @@ class BRDOrchestrator:
         messages = result["messages"]
         if isinstance(messages, list) and messages:
           last = messages[-1]
-          content = last.content if hasattr(last, "content") else str(last)
+          raw = last.content if hasattr(last, "content") else str(last)
+          content = _message_content_to_str(raw)
+        else:
+          content = str(result)
       else:
         content = str(result)
     else:
@@ -319,7 +518,7 @@ class BRDOrchestrator:
 
       logger.info("reprocessing_manager", agent_id=agent_id, gaps=len(agent_gaps))
       msg = await self._execute_manager(agent_id, feedback=request)
-      self._record_message(msg, agent_id)
+      self._record_and_save(msg, agent_id)
 
   # ------------------------------------------------------------------
   # Prompt building
@@ -329,17 +528,38 @@ class BRDOrchestrator:
     self,
     name: str,
     feedback: Optional[ReprocessRequest] = None,
+    file_override: Optional[List[str]] = None,
   ) -> str:
-    """Build context-aware prompt for a manager."""
-    prior_context = self._get_prior_context(name)
+    """Build context-aware prompt for a manager.
 
-    prompt = (
-      f"User Query: {self.context.user_query}\n"
-      f"Corpus Files: {', '.join(self.context.corpus_files[:20])}\n\n"
-    )
+    Tells agents which prior outputs are available and how to read them
+    via read_agent_output tool. No inline content -- agents read full files.
+    """
+    deps = self._get_dependencies(name)
+    available_outputs = [d for d in deps if d in self._completed_agents]
+    files = file_override if file_override is not None else self._non_drool_files
 
-    if prior_context:
-      prompt += f"Previous Agent Outputs:\n{prior_context}\n\n"
+    prompt = f"USER QUERY: {self.context.user_query}\n\n"
+
+    # Explicit file list -- agent reads these with read_corpus_file
+    if files:
+      file_list = "\n".join(f"  - {f}" for f in files)
+      prompt += f"FILES TO ANALYZE:\n{file_list}\n\n"
+      prompt += (
+        "Read each file using the read_corpus_file tool. "
+        "Group files by source workbook (shared prefix) and process in logical order.\n\n"
+      )
+    else:
+      prompt += "No specific corpus files assigned. Work with the context provided.\n\n"
+
+    # Tell agent about prior outputs -- they read full content via tool
+    if available_outputs:
+      output_list = "\n".join(f"  - {a} (read with: read_agent_output('{a}'))" for a in available_outputs)
+      prompt += (
+        f"PREVIOUS AGENT OUTPUTS AVAILABLE:\n{output_list}\n\n"
+        f"Use the read_agent_output tool to read each previous agent's FULL output. "
+        f"These contain the complete analysis from prior pipeline stages.\n\n"
+      )
 
     if feedback:
       prompt += (
@@ -349,13 +569,17 @@ class BRDOrchestrator:
         f"Address the gaps above and update your output.\n"
       )
     else:
-      prompt += "Analyze the query and corpus files. Generate comprehensive output for your domain.\n"
+      prompt += (
+        "Analyze the files and generate comprehensive output for your domain. "
+        "Be thorough and extract all relevant information.\n"
+      )
 
     return prompt
 
-  def _get_prior_context(self, name: str) -> str:
-    """Get relevant prior outputs for a manager based on dependency chain."""
-    deps = {
+  @staticmethod
+  def _get_dependencies(name: str) -> List[str]:
+    """Get dependency list for a manager."""
+    return {
       "drool": [],
       "model": [],
       "outbound": ["drool", "model"],
@@ -364,25 +588,36 @@ class BRDOrchestrator:
       "reviewer": ["drool", "model", "outbound", "transformation", "inbound"],
     }.get(name, [])
 
-    parts = []
-    for msg in self.context.all_messages:
-      if msg.agent_id in deps and msg.markdown_content:
-        # Truncate to keep context manageable
-        content = msg.markdown_content[:2000]
-        parts.append(f"## {msg.agent_id.upper()} Output:\n{content}")
-
-    return "\n\n".join(parts)
-
   # ------------------------------------------------------------------
   # Helpers
   # ------------------------------------------------------------------
 
-  def _record_message(self, msg: Optional[AgentMessage], name: str) -> None:
-    """Record a message to execution context."""
+  def _record_tokens(self, manager_name: str, input_tokens: int, output_tokens: int) -> None:
+    """Callback for ExecutionLogger: record token usage and cost in context."""
+    if not self.context or not self.config.track_tokens:
+      return
+    in_t = input_tokens or 0
+    out_t = output_tokens or 0
+    cost = self.config.get_cost_estimate(in_t, out_t)
+    self.context.token_tracker.record_estimate(
+      manager_name, in_t, out_t, cost_estimate=cost,
+    )
+
+  def _record_and_save(self, msg: Optional[AgentMessage], name: str) -> None:
+    """Record message to context AND save full output to file for downstream agents."""
     if msg:
       self.context.add_message(msg)
-      if msg.status == MessageStatus.SUCCESS:
-        logger.info("message_recorded", agent=name, duration_ms=round(msg.duration_ms, 1))
+
+      # Save full markdown output to file (no truncation)
+      if msg.status == MessageStatus.SUCCESS and msg.markdown_content:
+        save_agent_output(name, msg.markdown_content)
+        self._completed_agents.append(name)
+        logger.info(
+          "message_recorded",
+          agent=name,
+          duration_ms=round(msg.duration_ms, 1),
+          output_chars=len(msg.markdown_content),
+        )
       else:
         logger.warning("message_recorded_with_issues", agent=name, status=msg.status.value)
     else:

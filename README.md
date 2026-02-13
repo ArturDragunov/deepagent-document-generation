@@ -4,21 +4,24 @@ Async multi-agent pipeline for generating Business Requirement Documents using t
 
 ## Architecture
 
-6 manager agents, each with specialized sub-agents (Analysis, Synthesis, Writer, Review):
+6 flat manager agents (no sub-agents), orchestrated asynchronously:
 
 ```
-Phase 1 (parallel):   Drool Agent (5 sub-agents)  +  Model Agent (4 sub-agents)
-Phase 2 (sequential): Outbound -> Transformation -> Inbound (4 sub-agents each)
-Phase 3 (validation): Reviewer Agent (Writer + Review) -> .docx output
+Phase 0:              Drool File Filter (LLM-based, file-by-file relevance check)
+Phase 1 (parallel):   Drool Agent  +  Model Agent
+Phase 2 (sequential): Outbound Agent
+                       Transformation Agent (gets drool + model + outbound outputs)
+                       Inbound Agent (gets all prior outputs)
+Phase 3 (validation): Reviewer Agent -> validates -> generates .docx BRD
 ```
 
-The Reviewer can request managers to reprocess sections if gaps are detected (max 2 retries).
+Each sequential step receives ALL prior agent outputs as context. The Reviewer can request managers to reprocess if gaps are detected (max 2 retries).
 
 ## Quick Start
 
 ```bash
 cp .env.example .env
-# Set your LLM_MODEL and API keys in .env
+# Set OPENAI_API_KEY and LLM_MODEL in .env (or .env.local for local overrides)
 
 pip install -e ".[dev]"
 python -m src.main --query "Create BRD for LC0070 payment authorization"
@@ -26,7 +29,7 @@ python -m src.main --query "Create BRD for LC0070 payment authorization"
 
 ## Configuration
 
-Set `LLM_MODEL` in `.env` using the `provider:model` format:
+Set `LLM_MODEL` using the `provider:model` format:
 
 ```bash
 # OpenAI
@@ -40,8 +43,6 @@ LLM_MODEL_PROVIDER=bedrock_converse
 LLM_MODEL=ollama:neural-chat
 ```
 
-See `.env.example` for all options.
-
 ## Project Structure
 
 ```
@@ -50,13 +51,15 @@ src/
   config.py               Configuration (env-based)
   models.py               Data models
   orchestrator.py          Async pipeline orchestrator
+  llm.py                  Generic LLM factory (init_chat_model)
   guardrails.py            Input validation
   logger.py                Structured logging (structlog)
+  execution_logging.py     LLM/tool call callback logger
   agents/
-    agent_definitions.py   Agent + sub-agent factories
+    agent_definitions.py   Flat agent factories (no sub-agents)
   tools/
     corpus_reader.py       Format-aware file reader (JSONL/CSV/Excel/PDF/Word/.drl)
-    keyword_extractor.py   Query keyword extraction
+    drool_filter.py        LLM-based file relevance filter (Pydantic structured output)
     token_estimator.py     Token counting + cost estimation
     code_executor.py       Python code execution (for .docx generation)
   prompts/
@@ -65,12 +68,15 @@ src/
 
 ## How It Works
 
-1. **Drool Agent** identifies relevant files via keyword/regex filtering, extracts business rules
-2. **Model Agent** parses JSON/JSONL model specs for entities and relationships
-3. **Outbound/Transformation/Inbound Agents** process workbook JSONL sheets sequentially
-4. **Reviewer Agent** synthesizes all outputs, validates completeness, generates `.docx` via code execution
+1. **Drool File Filter** classifies corpus files by relevance via LLM calls (file-by-file, Pydantic structured output)
+2. **Drool Agent** reads filtered files, extracts business rules and requirements
+3. **Model Agent** (parallel with Drool) parses JSON/JSONL model specs for entities and relationships
+4. **Outbound Agent** processes workbook JSONL sheets for outbound integration data
+5. **Transformation Agent** documents transformation rules, mappings, and validation logic
+6. **Inbound Agent** analyzes inbound data sources and ingestion requirements
+7. **Reviewer Agent** synthesizes all outputs, validates completeness, generates `.docx` via code execution
 
-Custom tools supplement deepagents' built-in tools (`ls`, `glob`, `grep`, `read_file`, `write_file`, `write_todos`, `task`).
+File access is restricted: agents read corpus files ONLY through `read_corpus_file` (enforces `CORPUS_DIR`). No unrestricted filesystem access.
 
 ## Supported File Formats
 

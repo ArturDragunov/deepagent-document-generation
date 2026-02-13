@@ -9,15 +9,6 @@ from typing import Any, Dict, List, Optional
 
 class AgentType(str, Enum):
   MANAGER = "manager"
-  SUB_AGENT = "sub_agent"
-
-
-class SubAgentType(str, Enum):
-  ANALYSIS = "analysis"
-  SYNTHESIS = "synthesis"
-  WRITER = "writer"
-  REVIEW = "review"
-  FILE_FILTER = "file_filter"
 
 
 class MessageStatus(str, Enum):
@@ -56,7 +47,6 @@ class AgentMessage:
 
   agent_id: str
   agent_type: AgentType
-  sub_type: Optional[SubAgentType] = None
   markdown_content: str = ""
   metadata: Dict[str, Any] = field(default_factory=dict)
   duration_ms: float = 0.0
@@ -67,8 +57,7 @@ class AgentMessage:
     return {
       "agent_id": self.agent_id,
       "agent_type": self.agent_type.value,
-      "sub_type": self.sub_type.value if self.sub_type else None,
-      "markdown_content": self.markdown_content[:500],
+      "markdown_content": self.markdown_content,
       "metadata": self.metadata,
       "duration_ms": round(self.duration_ms, 2),
       "status": self.status.value,
@@ -82,13 +71,21 @@ class TokenTracker:
   accounts: List[TokenAccount] = field(default_factory=list)
 
   def record_estimate(
-    self, agent_id: str, input_tokens: int, output_tokens: int,
+    self,
+    agent_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost_estimate: Optional[float] = None,
   ) -> None:
+    in_t = input_tokens or 0
+    out_t = output_tokens or 0
+    cost = cost_estimate if cost_estimate is not None else 0.0
     self.accounts.append(TokenAccount(
       agent_id=agent_id,
-      input_tokens=input_tokens,
-      output_tokens=output_tokens,
-      estimated_tokens=input_tokens + output_tokens,
+      input_tokens=in_t,
+      output_tokens=out_t,
+      estimated_tokens=in_t + out_t,
+      cost_estimate=cost,
     ))
 
   def get_summary(self) -> Dict[str, Any]:

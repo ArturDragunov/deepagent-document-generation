@@ -1,4 +1,4 @@
-"""Tests for agent definitions."""
+"""Tests for agent definitions and prompts."""
 
 import pytest
 from unittest.mock import patch, MagicMock
@@ -8,37 +8,6 @@ from src.prompts.prompt_library import PromptLibrary
 
 class TestPromptLibrary:
   """Test prompt library methods."""
-
-  def test_subagent_descriptions_exist(self):
-    """All domain+type combos should return non-empty descriptions."""
-    domains = ["drool", "model", "outbound", "transformation", "inbound", "reviewer"]
-    types = ["analysis", "synthesis", "writer", "review"]
-
-    for domain in domains:
-      for sub_type in types:
-        desc = PromptLibrary.get_subagent_description(domain, sub_type)
-        assert desc, f"Missing description for {domain}/{sub_type}"
-        assert len(desc) > 5
-
-  def test_file_filter_description(self):
-    desc = PromptLibrary.get_subagent_description("drool", "file_filter")
-    assert "file" in desc.lower() or "filter" in desc.lower()
-
-  def test_subagent_prompts_exist(self):
-    """All subagent prompts should return non-empty strings."""
-    domains = ["drool", "model", "outbound", "transformation", "inbound"]
-    types = ["analysis", "synthesis", "writer", "review"]
-
-    for domain in domains:
-      for sub_type in types:
-        prompt = PromptLibrary.get_subagent_prompt(domain, sub_type)
-        assert prompt, f"Missing prompt for {domain}/{sub_type}"
-        assert len(prompt) > 20
-
-  def test_file_filter_prompt(self):
-    prompt = PromptLibrary.get_subagent_prompt("drool", "file_filter")
-    assert "filter" in prompt.lower() or "relevant" in prompt.lower()
-    assert "JSON" in prompt
 
   def test_manager_prompts_exist(self):
     """All manager prompts should exist and be non-empty."""
@@ -54,6 +23,18 @@ class TestPromptLibrary:
       assert p
       assert len(p) > 50
 
+  def test_drool_prompt_no_subagent_references(self):
+    """Drool prompt should not reference sub-agents."""
+    prompt = PromptLibrary.get_drool_manager_prompt()
+    assert "sub-agent" not in prompt.lower()
+    assert "delegate" not in prompt.lower()
+    assert "read_corpus_file" in prompt
+
+  def test_model_prompt_no_subagent_references(self):
+    prompt = PromptLibrary.get_model_manager_prompt()
+    assert "sub-agent" not in prompt.lower()
+    assert "delegate" not in prompt.lower()
+
   def test_reviewer_prompt_mentions_execute_python(self):
     prompt = PromptLibrary.get_reviewer_supervisor_prompt()
     assert "execute_python" in prompt
@@ -64,6 +45,19 @@ class TestPromptLibrary:
     assert "Executive Summary" in prompt
     assert "Requirements" in prompt
     assert "Data Models" in prompt
+
+  def test_all_prompts_mention_read_corpus_file(self):
+    """All manager prompts should mention the read_corpus_file tool."""
+    prompts = [
+      PromptLibrary.get_drool_manager_prompt(),
+      PromptLibrary.get_model_manager_prompt(),
+      PromptLibrary.get_outbound_manager_prompt(),
+      PromptLibrary.get_transformation_manager_prompt(),
+      PromptLibrary.get_inbound_manager_prompt(),
+      PromptLibrary.get_reviewer_supervisor_prompt(),
+    ]
+    for p in prompts:
+      assert "read_corpus_file" in p
 
 
 class TestAgentDefinitions:
@@ -84,16 +78,30 @@ class TestAgentDefinitions:
     assert mock_create.call_count == 6
 
   @patch("src.agents.agent_definitions.create_deep_agent")
-  def test_drool_has_5_subagents(self, mock_create):
-    """Drool should have 5 sub-agents (file_filter + 4 standard)."""
+  def test_no_subagents_passed(self, mock_create):
+    """No agent should have subagents parameter."""
     mock_create.return_value = MagicMock()
 
-    from src.agents.agent_definitions import create_drool_manager
-    create_drool_manager(model="openai:gpt-4")
+    from src.agents.agent_definitions import create_all_managers
+    create_all_managers(model="openai:gpt-4")
 
-    call_kwargs = mock_create.call_args
-    subagents = call_kwargs.kwargs.get("subagents", [])
-    assert len(subagents) == 5
+    for call in mock_create.call_args_list:
+      assert "subagents" not in call.kwargs, (
+        f"subagents should not be passed: {call.kwargs}"
+      )
+
+  @patch("src.agents.agent_definitions.create_deep_agent")
+  def test_no_filesystem_backend(self, mock_create):
+    """No agent should use FilesystemBackend."""
+    mock_create.return_value = MagicMock()
+
+    from src.agents.agent_definitions import create_all_managers
+    create_all_managers(model="openai:gpt-4")
+
+    for call in mock_create.call_args_list:
+      assert "backend" not in call.kwargs, (
+        f"backend should not be passed (use default StateBackend): {call.kwargs}"
+      )
 
   @patch("src.agents.agent_definitions.create_deep_agent")
   def test_reviewer_has_execute_python(self, mock_create):
@@ -118,3 +126,14 @@ class TestAgentDefinitions:
 
     call_kwargs = mock_create.call_args
     assert call_kwargs.kwargs.get("model_provider") == "bedrock_converse"
+
+  @patch("src.agents.agent_definitions.create_deep_agent")
+  def test_model_provider_not_passed_when_none(self, mock_create):
+    """model_provider should NOT be in kwargs when None."""
+    mock_create.return_value = MagicMock()
+
+    from src.agents.agent_definitions import create_model_manager
+    create_model_manager(model="openai:gpt-4")
+
+    call_kwargs = mock_create.call_args
+    assert "model_provider" not in call_kwargs.kwargs

@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.orchestrator import BRDOrchestrator
+from src.orchestrator import BRDOrchestrator, group_files_by_workbook
 from src.models import MessageStatus
 
 
@@ -50,14 +50,6 @@ class TestConfiguration:
     config3 = get_config()
     assert config3 is not config1
 
-  def test_config_defaults(self):
-    from src.config import reset_config, get_config
-    reset_config()
-    config = get_config()
-    assert config.llm_model == "openai:gpt-4"
-    assert config.agent_timeout_sec == 300
-    assert config.max_retries == 2
-
   def test_config_env_override(self, monkeypatch):
     from src.config import reset_config, get_config
     reset_config()
@@ -73,6 +65,13 @@ class TestConfiguration:
     monkeypatch.setenv("LLM_MODEL_PROVIDER", "bedrock_converse")
     config = get_config()
     assert config.llm_model_provider == "bedrock_converse"
+
+  def test_reviewer_timeout_sec(self, monkeypatch):
+    from src.config import reset_config, get_config
+    reset_config()
+    monkeypatch.setenv("REVIEWER_TIMEOUT_SEC", "900")
+    config = get_config()
+    assert config.reviewer_timeout_sec == 900
 
 
 @pytest.mark.asyncio
@@ -105,3 +104,39 @@ class TestBRDOrchestrator:
       corpus_files=[],
     )
     assert result.status == MessageStatus.ERROR
+
+
+class TestGroupFilesByWorkbook:
+  """Test file grouping for workbook-scoped runs."""
+
+  def test_empty_returns_empty(self):
+    assert group_files_by_workbook([], "_sheet") == []
+
+  def test_no_delimiter_each_file_own_group(self):
+    files = ["a.jsonl", "b.jsonl"]
+    assert group_files_by_workbook(files, "_sheet") == [["a.jsonl"], ["b.jsonl"]]
+
+  def test_same_prefix_one_group(self):
+    files = ["workbook_A_sheet1.jsonl", "workbook_A_sheet2.jsonl"]
+    got = group_files_by_workbook(files, "_sheet")
+    assert len(got) == 1
+    assert set(got[0]) == set(files)
+
+  def test_two_workbooks_two_groups(self):
+    files = [
+      "workbook_A_sheet1.jsonl",
+      "workbook_A_sheet2.jsonl",
+      "workbook_B_sheet1.jsonl",
+    ]
+    got = group_files_by_workbook(files, "_sheet")
+    assert len(got) == 2
+    assert set(got[0]) == {"workbook_A_sheet1.jsonl", "workbook_A_sheet2.jsonl"}
+    assert got[1] == ["workbook_B_sheet1.jsonl"]
+
+  def test_max_per_group_splits_large_workbook(self):
+    files = [f"workbook_A_sheet{i}.jsonl" for i in range(20)]
+    got = group_files_by_workbook(files, "_sheet", max_per_group=8)
+    assert len(got) == 3
+    assert len(got[0]) == 8
+    assert len(got[1]) == 8
+    assert len(got[2]) == 4

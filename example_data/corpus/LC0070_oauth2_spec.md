@@ -1,47 +1,56 @@
-# Authentication System - Business Requirements Specification
+# LC0070 Payment Authorization - Technical Specification
 
-## LC0070: OAuth2 Integration Requirements
+## Overview
 
-### Overview
-The system must implement OpenID Connect (OIDC) compliant OAuth2 flow to enable secure single sign-on capabilities across web and mobile platforms.
+Line Code 0070 (LC0070) defines the payment authorization flow for cross-border
+SWIFT transactions. This specification covers the end-to-end authorization process
+from transaction receipt through final settlement approval.
 
-### Key Requirements
+## Authorization Flow
 
-1. **Authorization Code Flow**
-   - Support OAuth2 Authorization Code flow as primary authentication method
-   - Redirect URI validation (whitelist-based)
-   - State parameter validation to prevent CSRF attacks
-   - Authorization code expiration: 10 minutes
+1. **Transaction Receipt** -- Inbound SWIFT message parsed and validated
+2. **Sanctions Screening** -- Destination country checked against sanctioned list
+3. **Amount Validation** -- Transaction amount verified within configured limits
+4. **Risk Scoring** -- Automated risk assessment based on amount, country, sender
+5. **Authorization Decision** -- Auto-approve, escalate, or deny based on risk score
+6. **Settlement** -- Approved transactions forwarded to settlement engine
 
-2. **Token Management**
-   - JWT access tokens (15 minutes default)
-   - Refresh tokens (7 days default, rotatable)
-   - ID tokens for OpenID Connect
-   - Token endpoint must support client credentials
+## Data Requirements
 
-3. **Scopes**
-   - `openid`: Request ID token
-   - `profile`: Request user profile information
-   - `email`: Request email address
-   - `offline_access`: Request refresh tokens
-   - Custom scopes per application
+### Transaction Fields
 
-4. **Client Types**
-   - Web applications (confidential clients, server-to-server)
-   - Mobile/SPA applications (public clients, PKCE required)
-   - Backend services (client credentials)
-   - Third-party integrations (authorization code with PKCE)
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| transaction_id | VARCHAR(36) | Yes | Unique SWIFT transaction ID |
+| amount | DECIMAL(18,2) | Yes | Transaction amount |
+| currency | CHAR(3) | Yes | ISO 4217 currency code |
+| sender_bic | VARCHAR(11) | Yes | Sender BIC/SWIFT code |
+| receiver_bic | VARCHAR(11) | Yes | Receiver BIC/SWIFT code |
+| value_date | DATE | Yes | Settlement value date |
+| destination_country | CHAR(2) | No | ISO 3166-1 country code |
 
-### Security Considerations
+### Risk Score Thresholds
 
-- All tokens must be signed with RS256
-- Token revocation endpoint required
-- Client secrets must be stored securely (bcrypt)
-- Implement rate limiting on token endpoint
-- Audit logging for all authentication events
+- **Low risk (0-29)**: Auto-approved if amount <= 50,000
+- **Medium risk (30-69)**: Escalated for manual review
+- **High risk (70-100)**: Automatically denied
 
-### Compliance
+## Business Rules
 
-- Must meet NIST SP 800-63B requirements
-- SOC2 Type II compliance
-- GDPR data handling for EU users
+- Transactions to sanctioned countries are blocked immediately (no risk scoring)
+- High-value transactions (> 50,000) always require additional verification
+- Risk score considers: transaction amount, destination country risk, sender history
+- All authorization decisions are logged for audit compliance
+
+## Integration Points
+
+- **Inbound**: SWIFT message gateway (MT103, MT202)
+- **Outbound**: Settlement engine, compliance reporting
+- **Transformation**: BIC-to-entity resolution, currency normalization, date formatting
+
+## Acceptance Criteria
+
+- Authorization latency < 500ms for auto-approved transactions
+- 100% sanctions screening coverage
+- Audit trail for every authorization decision
+- Support for 10,000+ concurrent transaction authorizations
