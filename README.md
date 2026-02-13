@@ -1,171 +1,86 @@
-# DeepAgents BRD Generation System
+# DeepAgents BRD Generation
 
-Production-ready Business Requirement Document (BRD) generation system using **DeepAgents** and native subagent support. Generates comprehensive BRDs from source files using a 6-manager async pipeline.
+Async multi-agent pipeline for generating Business Requirement Documents using the [deepagents](https://docs.langchain.com/oss/python/deepagents/overview) framework.
+
+## Architecture
+
+6 manager agents, each with specialized sub-agents (Analysis, Synthesis, Writer, Review):
+
+```
+Phase 1 (parallel):   Drool Agent (5 sub-agents)  +  Model Agent (4 sub-agents)
+Phase 2 (sequential): Outbound -> Transformation -> Inbound (4 sub-agents each)
+Phase 3 (validation): Reviewer Agent (Writer + Review) -> .docx output
+```
+
+The Reviewer can request managers to reprocess sections if gaps are detected (max 2 retries).
 
 ## Quick Start
 
 ```bash
 cp .env.example .env
-# Edit .env with your LLM credentials (OpenAI, Bedrock, Ollama, etc.)
+# Set your LLM_MODEL and API keys in .env
 
-python -m src.main --query "Create BRD for user authentication system"
+pip install -e ".[dev]"
+python -m src.main --query "Create BRD for LC0070 payment authorization"
 ```
-
-## Features
-
-- **6-Manager Pipeline**: Drool, Model, Outbound, Transformation, Inbound, Reviewer
-- **Native DeepAgents Subagents**: Automatic orchestration (Analysis → Synthesis → Writer → Review)
-- **Async Execution**: Phase 1 (Drool+Model parallel), Phase 2 (sequential cascade), Phase 3 (validation)
-- **Multi-LLM Support**: OpenAI, AWS Bedrock, Ollama, or any LangChain provider
-- **Multi-Format Files**: JSON, JSONL, CSV, Excel, PDF, Word, Markdown, .drl files
-- **Token Tracking**: Cost estimation and usage accounting
-- **Feedback Loop**: Reviewer validates; requests reruns if gaps detected (max 2 retries)
 
 ## Configuration
 
-Set your LLM provider in `.env`:
+Set `LLM_MODEL` in `.env` using the `provider:model` format:
 
 ```bash
 # OpenAI
-LLM_PROVIDER=openai
-LLM_MODEL=gpt-4
-LLM_API_KEY=sk-...
+LLM_MODEL=openai:gpt-4
 
 # AWS Bedrock
-LLM_PROVIDER=bedrock
-LLM_MODEL=anthropic.claude-3-sonnet-20240229-v1:0
-BEDROCK_REGION=us-east-1
+LLM_MODEL=anthropic.claude-3-5-sonnet-20240620-v1:0
+LLM_MODEL_PROVIDER=bedrock_converse
 
 # Ollama (local)
-LLM_PROVIDER=ollama
-LLM_MODEL=neural-chat
-LLM_BASE_URL=http://localhost:11434
+LLM_MODEL=ollama:neural-chat
 ```
 
-Other options in `.env.example`.
-
-## Usage
-
-```bash
-# Basic
-python -m src.main --query "Your BRD query"
-
-# Custom corpus
-python -m src.main --query "..." --corpus ./my_corpus
-
-# Debug logging
-python -m src.main --query "..." --log-level DEBUG
-
-# Dry run (validation only)
-python -m src.main --query "..." --dry-run
-```
-
-## Architecture
-
-```
-Phase 1 (Parallel):       Phase 2 (Sequential):     Phase 3 (Validation):
-Drool Manager             Outbound Manager          Reviewer Supervisor
-├─ File Filter            ├─ Analysis               ├─ Writer
-├─ Analysis               ├─ Synthesis              └─ Review
-├─ Synthesis              ├─ Writer
-├─ Writer                 └─ Review
-└─ Review                              & 2 more managers (Transformation, Inbound)
-     ↓
-Model Manager
-├─ Analysis
-├─ Synthesis
-├─ Writer
-└─ Review
-```
-
-All subagent orchestration handled by DeepAgents natively—no manual coordination needed.
+See `.env.example` for all options.
 
 ## Project Structure
 
 ```
 src/
-├── main.py                    # CLI entry point
-├── config.py                  # Configuration (generic LLM support)
-├── models.py                  # Data models
-├── orchestrator.py            # Async pipeline orchestrator
-├── guardrails.py              # Input validation
-├── agents/
-│   └── agent_definitions.py   # Agent & subagent factories
-├── tools/
-│   ├── file_reader.py         # Multi-format file reading
-│   ├── regex_tool.py          # Pattern matching
-│   ├── token_estimator.py     # Token counting & cost
-│   ├── llm_client.py          # Multi-provider LLM wrapper
-│   └── docx_writer.py         # Word document generation
-└── prompts/
-    └── prompt_library.py      # All agent prompts
-
-example_data/corpus/           # Sample corpus files
+  main.py                 CLI entry point
+  config.py               Configuration (env-based)
+  models.py               Data models
+  orchestrator.py          Async pipeline orchestrator
+  guardrails.py            Input validation
+  logger.py                Structured logging (structlog)
+  agents/
+    agent_definitions.py   Agent + sub-agent factories
+  tools/
+    corpus_reader.py       Format-aware file reader (JSONL/CSV/Excel/PDF/Word/.drl)
+    keyword_extractor.py   Query keyword extraction
+    token_estimator.py     Token counting + cost estimation
+    code_executor.py       Python code execution (for .docx generation)
+  prompts/
+    prompt_library.py      All agent prompts
 ```
+
+## How It Works
+
+1. **Drool Agent** identifies relevant files via keyword/regex filtering, extracts business rules
+2. **Model Agent** parses JSON/JSONL model specs for entities and relationships
+3. **Outbound/Transformation/Inbound Agents** process workbook JSONL sheets sequentially
+4. **Reviewer Agent** synthesizes all outputs, validates completeness, generates `.docx` via code execution
+
+Custom tools supplement deepagents' built-in tools (`ls`, `glob`, `grep`, `read_file`, `write_file`, `write_todos`, `task`).
 
 ## Supported File Formats
 
-- Data: JSON, JSONL, CSV, Excel (.xlsx)
-- Documents: PDF, Word (.docx), Markdown (.md)
-- Code: .drl (Drools), text files
-
-## Multi-LLM Support
-
-Works with any LangChain provider:
-- OpenAI (GPT-4, GPT-3.5, etc.)
-- AWS Bedrock (Claude, Llama, etc.)
-- Ollama (local models)
-- Custom endpoints via LangChain
-
-Just configure `LLM_PROVIDER` and `LLM_MODEL` in `.env`.
+JSONL, JSON, CSV, Excel (.xlsx), PDF, Word (.docx), Drools (.drl), Markdown, plain text.
 
 ## Testing
 
 ```bash
-pytest tests/
-pytest tests/ -v --cov=src
+pytest tests/ -v
 ```
-
-## Documentation
-
-- **IMPLEMENTATION_SUMMARY.md** - Architecture & design
-- **DEEPAGENTS_QUICK_REFERENCE.md** - How to use & customize subagents
-- **REFACTORING_SUMMARY.md** - DeepAgents native subagent details
-
-## Extending
-
-### Add a Tool
-```python
-# In src/tools/my_tool.py
-async def my_tool(param: str) -> str:
-    """Description shown to agent."""
-    return result
-
-# In src/agents/agent_definitions.py
-tools=[my_tool, ...]
-```
-
-### Customize Prompts
-```python
-# In src/prompts/prompt_library.py
-def get_subagent_prompt(domain, sub_type):
-    return "Your custom prompt..."
-```
-
-### Change LLM Provider
-Edit `.env`:
-```bash
-LLM_PROVIDER=bedrock
-LLM_MODEL=anthropic.claude-3-sonnet-20240229-v1:0
-```
-
-That's it—no code changes needed!
-
-## Performance
-
-- **Execution**: 2-5 minutes (depending on corpus size)
-- **Token usage**: ~50,000-150,000 tokens per BRD
-- **Cost**: $0.10 - $0.50 per BRD (varies by model & provider)
 
 ## License
 

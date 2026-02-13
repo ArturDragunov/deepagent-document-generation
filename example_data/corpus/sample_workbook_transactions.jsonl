@@ -1,0 +1,7 @@
+{"sheet": "TransactionSources", "row": 1, "source_system": "SWIFT", "field": "transaction_id", "type": "VARCHAR(36)", "description": "Unique SWIFT transaction identifier", "nullable": false, "example": "SWIFT-2024-001234"}
+{"sheet": "TransactionSources", "row": 2, "source_system": "SWIFT", "field": "amount", "type": "DECIMAL(18,2)", "description": "Transaction amount in source currency", "nullable": false, "example": "15000.00"}
+{"sheet": "TransactionSources", "row": 3, "source_system": "SWIFT", "field": "currency", "type": "CHAR(3)", "description": "ISO 4217 currency code", "nullable": false, "example": "USD"}
+{"sheet": "TransactionSources", "row": 4, "source_system": "SWIFT", "field": "sender_bic", "type": "VARCHAR(11)", "description": "Sender bank BIC/SWIFT code", "nullable": false, "example": "DEUTDEFF"}
+{"sheet": "TransactionSources", "row": 5, "source_system": "SWIFT", "field": "receiver_bic", "type": "VARCHAR(11)", "description": "Receiver bank BIC/SWIFT code", "nullable": false, "example": "BNPAFRPP"}
+{"sheet": "TransactionSources", "row": 6, "source_system": "SWIFT", "field": "value_date", "type": "DATE", "description": "Settlement value date", "nullable": false, "example": "2024-03-15"}
+{"sheet": "TransactionSources", "row": 7, "source_system": "SWIFT", "field": "destination_country", "type": "CHAR(2)", "description": "ISO 3166-1 destination country", "nullable": true, "example": "DE"}

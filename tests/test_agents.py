@@ -1,141 +1,120 @@
-"""Tests for agents."""
+"""Tests for agent definitions."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import patch, MagicMock
 
-from src.agents.base_agent import BaseAgent
-from src.agents.sub_agent import AnalysisSubAgent
-from src.agents.manager_agent import ManagerAgent
-from src.models import AgentType, ExecutionContext, TokenTracker, MessageStatus
+from src.prompts.prompt_library import PromptLibrary
 
 
-@pytest.mark.asyncio
-class TestBaseAgent:
-    """Test BaseAgent."""
+class TestPromptLibrary:
+  """Test prompt library methods."""
 
-    async def test_execute_with_timeout(self, mock_llm_client):
-        """Test agent execution."""
-        agent = BaseAgent(
-            agent_id="test_agent",
-            agent_type=AgentType.MANAGER,
-            timeout_sec=10,
-        )
+  def test_subagent_descriptions_exist(self):
+    """All domain+type combos should return non-empty descriptions."""
+    domains = ["drool", "model", "outbound", "transformation", "inbound", "reviewer"]
+    types = ["analysis", "synthesis", "writer", "review"]
 
-        context = ExecutionContext(
-            user_query="Test query",
-            corpus_files=[],
-            token_tracker=TokenTracker(),
-        )
+    for domain in domains:
+      for sub_type in types:
+        desc = PromptLibrary.get_subagent_description(domain, sub_type)
+        assert desc, f"Missing description for {domain}/{sub_type}"
+        assert len(desc) > 5
 
-        result = await agent.execute("Test message", context)
+  def test_file_filter_description(self):
+    desc = PromptLibrary.get_subagent_description("drool", "file_filter")
+    assert "file" in desc.lower() or "filter" in desc.lower()
 
-        assert result.agent_id == "test_agent"
-        assert result.agent_type == AgentType.MANAGER
-        assert result.status == MessageStatus.SUCCESS
+  def test_subagent_prompts_exist(self):
+    """All subagent prompts should return non-empty strings."""
+    domains = ["drool", "model", "outbound", "transformation", "inbound"]
+    types = ["analysis", "synthesis", "writer", "review"]
 
-    async def test_execute_creates_error_message_on_exception(self):
-        """Test error message creation."""
-        agent = BaseAgent(
-            agent_id="test_agent",
-            agent_type=AgentType.MANAGER,
-        )
+    for domain in domains:
+      for sub_type in types:
+        prompt = PromptLibrary.get_subagent_prompt(domain, sub_type)
+        assert prompt, f"Missing prompt for {domain}/{sub_type}"
+        assert len(prompt) > 20
 
-        context = ExecutionContext(
-            user_query="Test",
-            corpus_files=[],
-            token_tracker=TokenTracker(),
-        )
+  def test_file_filter_prompt(self):
+    prompt = PromptLibrary.get_subagent_prompt("drool", "file_filter")
+    assert "filter" in prompt.lower() or "relevant" in prompt.lower()
+    assert "JSON" in prompt
 
-        # Override _run_agent_logic to raise exception
-        async def raise_error(*args, **kwargs):
-            raise ValueError("Test error")
+  def test_manager_prompts_exist(self):
+    """All manager prompts should exist and be non-empty."""
+    prompts = [
+      PromptLibrary.get_drool_manager_prompt(),
+      PromptLibrary.get_model_manager_prompt(),
+      PromptLibrary.get_outbound_manager_prompt(),
+      PromptLibrary.get_transformation_manager_prompt(),
+      PromptLibrary.get_inbound_manager_prompt(),
+      PromptLibrary.get_reviewer_supervisor_prompt(),
+    ]
+    for p in prompts:
+      assert p
+      assert len(p) > 50
 
-        agent._run_agent_logic = raise_error
+  def test_reviewer_prompt_mentions_execute_python(self):
+    prompt = PromptLibrary.get_reviewer_supervisor_prompt()
+    assert "execute_python" in prompt
+    assert "docx" in prompt.lower() or ".docx" in prompt
 
-        result = await agent.execute("Test", context)
-
-        assert result.status == MessageStatus.ERROR
-        assert "Test error" in result.markdown_content
-
-
-@pytest.mark.asyncio
-class TestSubAgent:
-    """Test SubAgent."""
-
-    async def test_analysis_agent_execution(self, mock_llm_client):
-        """Test analysis sub-agent."""
-        from src.agents.sub_agent import AnalysisSubAgent
-
-        agent = AnalysisSubAgent(
-            agent_id="analysis_1",
-            llm_client=mock_llm_client,
-            system_prompt="Test prompt",
-        )
-
-        context = ExecutionContext(
-            user_query="Test",
-            corpus_files=[],
-            token_tracker=TokenTracker(),
-        )
-
-        result = await agent.execute("Test query", context)
-
-        assert result.agent_id == "analysis_1"
-        assert result.sub_type.value == "analysis"
-        assert result.markdown_content == "# Test Output\n\nMock response from LLM."
+  def test_reviewer_prompt_mentions_brd_sections(self):
+    prompt = PromptLibrary.get_reviewer_supervisor_prompt()
+    assert "Executive Summary" in prompt
+    assert "Requirements" in prompt
+    assert "Data Models" in prompt
 
 
-@pytest.mark.asyncio
-class TestManagerAgent:
-    """Test ManagerAgent."""
+class TestAgentDefinitions:
+  """Test agent factory functions (without actually calling deepagents)."""
 
-    async def test_manager_orchestrates_subagents(self, mock_llm_client):
-        """Test manager orchestrates sub-agents."""
-        prompts = {
-            "analysis": "Analysis prompt",
-            "synthesis": "Synthesis prompt",
-            "writer": "Writer prompt",
-            "review": "Review prompt",
-        }
+  @patch("src.agents.agent_definitions.create_deep_agent")
+  def test_create_all_managers(self, mock_create):
+    """All 6 managers should be created."""
+    mock_create.return_value = MagicMock()
 
-        agent = ManagerAgent(
-            agent_id="test_manager",
-            llm_client=mock_llm_client,
-            prompts=prompts,
-            timeout_sec=30,
-        )
+    from src.agents.agent_definitions import create_all_managers
+    managers = create_all_managers(model="openai:gpt-4")
 
-        context = ExecutionContext(
-            user_query="Test query",
-            corpus_files=[],
-            token_tracker=TokenTracker(),
-        )
+    assert len(managers) == 6
+    assert set(managers.keys()) == {
+      "drool", "model", "outbound", "transformation", "inbound", "reviewer",
+    }
+    assert mock_create.call_count == 6
 
-        result = await agent.execute_with_subagents("Test input", context)
+  @patch("src.agents.agent_definitions.create_deep_agent")
+  def test_drool_has_5_subagents(self, mock_create):
+    """Drool should have 5 sub-agents (file_filter + 4 standard)."""
+    mock_create.return_value = MagicMock()
 
-        assert result.agent_id == "test_manager"
-        assert result.agent_type == AgentType.MANAGER
-        assert "## Analysis" in result.markdown_content or "analysis" in result.markdown_content.lower()
-        assert result.metadata.get("sub_agents_executed", 0) > 0
+    from src.agents.agent_definitions import create_drool_manager
+    create_drool_manager(model="openai:gpt-4")
 
-    async def test_manager_aggregates_tokens(self, mock_llm_client):
-        """Test token aggregation."""
-        prompts = {k: f"Prompt {k}" for k in ["analysis", "synthesis", "writer", "review"]}
+    call_kwargs = mock_create.call_args
+    subagents = call_kwargs.kwargs.get("subagents", [])
+    assert len(subagents) == 5
 
-        agent = ManagerAgent(
-            agent_id="test_manager",
-            llm_client=mock_llm_client,
-            prompts=prompts,
-        )
+  @patch("src.agents.agent_definitions.create_deep_agent")
+  def test_reviewer_has_execute_python(self, mock_create):
+    """Reviewer should have execute_python in its tools."""
+    mock_create.return_value = MagicMock()
 
-        context = ExecutionContext(
-            user_query="Test",
-            corpus_files=[],
-            token_tracker=TokenTracker(),
-        )
+    from src.agents.agent_definitions import create_reviewer_supervisor
+    create_reviewer_supervisor(model="openai:gpt-4")
 
-        result = await agent.execute_with_subagents("Test", context)
+    call_kwargs = mock_create.call_args
+    tools = call_kwargs.kwargs.get("tools", [])
+    tool_names = [t.__name__ for t in tools]
+    assert "execute_python" in tool_names
 
-        assert result.token_account is not None
-        assert result.token_account.estimated_tokens > 0
-        assert result.token_account.cost_estimate > 0
+  @patch("src.agents.agent_definitions.create_deep_agent")
+  def test_model_provider_passed(self, mock_create):
+    """model_provider should be passed to create_deep_agent when provided."""
+    mock_create.return_value = MagicMock()
+
+    from src.agents.agent_definitions import create_model_manager
+    create_model_manager(model="anthropic.claude-3", model_provider="bedrock_converse")
+
+    call_kwargs = mock_create.call_args
+    assert call_kwargs.kwargs.get("model_provider") == "bedrock_converse"

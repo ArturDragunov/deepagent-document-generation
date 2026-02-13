@@ -1,0 +1,70 @@
+package com.example.rules.lc0070
+
+import com.example.model.Transaction
+import com.example.model.ValidationResult
+
+// LC0070 - Payment Authorization Rules
+// Business logic for payment transaction authorization
+
+rule "LC0070-001 Validate Transaction Amount"
+  salience 100
+  when
+    $tx : Transaction(amount > 0, currency != null)
+  then
+    $tx.setValidationStatus("AMOUNT_VALID");
+    update($tx);
+end
+
+rule "LC0070-002 High Value Transaction Flag"
+  salience 90
+  when
+    $tx : Transaction(amount > 10000, validationStatus == "AMOUNT_VALID")
+  then
+    $tx.setRequiresManualReview(true);
+    $tx.addFlag("HIGH_VALUE");
+    update($tx);
+end
+
+rule "LC0070-003 Currency Conversion Required"
+  salience 80
+  when
+    $tx : Transaction(
+      sourceCurrency != null,
+      targetCurrency != null,
+      sourceCurrency != targetCurrency
+    )
+  then
+    $tx.setRequiresCurrencyConversion(true);
+    $tx.addFlag("FX_REQUIRED");
+    update($tx);
+end
+
+rule "LC0070-004 Duplicate Transaction Check"
+  salience 70
+  when
+    $tx : Transaction(transactionId != null)
+    $existing : Transaction(
+      transactionId == $tx.transactionId,
+      this != $tx,
+      status == "COMPLETED"
+    )
+  then
+    $tx.setValidationStatus("DUPLICATE_DETECTED");
+    $tx.addFlag("POSSIBLE_DUPLICATE");
+    update($tx);
+end
+
+rule "LC0070-005 Sanctioned Country Check"
+  salience 95
+  when
+    $tx : Transaction(destinationCountry != null)
+    $result : ValidationResult(
+      countryCode == $tx.destinationCountry,
+      sanctioned == true
+    )
+  then
+    $tx.setValidationStatus("BLOCKED");
+    $tx.addFlag("SANCTIONED_DESTINATION");
+    $tx.setBlockReason("Destination country is sanctioned");
+    update($tx);
+end

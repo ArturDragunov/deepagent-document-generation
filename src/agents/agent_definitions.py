@@ -1,334 +1,227 @@
 """Agent definitions using deepagents native subagent support.
 
-This module creates manager agents with specialized sub-agents, following deepagents best practices.
-Each manager has sub-agents for Analysis, Synthesis, Writing, and Review phases.
-
-Sub-agents are defined as dictionaries and passed directly to create_deep_agent(),
-which handles their orchestration and invocation.
+Creates manager agents with specialized sub-agents following deepagents best practices:
+- Tools are sync plain functions (framework handles async)
+- Model specified as string ("openai:gpt-4") or BaseChatModel
+- FilesystemBackend for local corpus access
+- Built-in tools (ls, glob, grep, read_file, write_file) available automatically
+- Custom tools only for format-specific operations
 """
 
-from typing import Callable, List, Any, Optional, Dict
+from typing import Any, Callable, Dict, List, Optional
+
 from deepagents import create_deep_agent
-from langchain.chat_models import BaseChatModel
+from deepagents.backends import FilesystemBackend
 
 from src.prompts.prompt_library import PromptLibrary
-from src.tools.file_reader import read_file, list_corpus_files
-from src.tools.regex_tool import (
-    search_files_by_pattern,
-    match_patterns_in_text,
-    extract_keywords,
-)
-from src.tools.token_estimator import estimate_tokens_in_text, calculate_cost
+from src.tools.corpus_reader import read_corpus_file
+from src.tools.keyword_extractor import extract_keywords
+from src.tools.token_estimator import estimate_tokens, calculate_cost
+from src.tools.code_executor import execute_python
 
 
 # ============================================================================
-# Sub-Agent Factory Functions
+# Sub-Agent Definitions
 # ============================================================================
 
-
-def create_sub_agent_dict(
-    domain: str,
-    sub_type: str,
-    tools: Optional[List[Callable]] = None,
+def _subagent(
+  domain: str,
+  sub_type: str,
+  tools: Optional[List[Callable]] = None,
 ) -> Dict[str, Any]:
-    """Create a subagent dictionary for deepagents.
+  """Create a subagent dict for deepagents.
 
-    Args:
-        domain: Domain name (e.g., 'drool', 'model', 'outbound')
-        sub_type: Sub-agent type ('analysis', 'synthesis', 'writer', 'review')
-        tools: Optional list of tools for this sub-agent
-
-    Returns:
-        Dictionary configured for deepagents subagents parameter
-    """
-    if tools is None:
-        tools = []
-
-    return {
-        "name": f"{domain}_{sub_type}",
-        "description": PromptLibrary.get_subagent_description(domain, sub_type),
-        "system_prompt": PromptLibrary.get_subagent_prompt(domain, sub_type),
-        "tools": tools,
-    }
+  Args:
+      domain: Domain name ('drool', 'model', 'outbound', etc.)
+      sub_type: Sub-agent type ('analysis', 'synthesis', 'writer', 'review', 'file_filter')
+      tools: Optional custom tools (built-in tools are always available)
+  """
+  return {
+    "name": f"{domain}_{sub_type}",
+    "description": PromptLibrary.get_subagent_description(domain, sub_type),
+    "system_prompt": PromptLibrary.get_subagent_prompt(domain, sub_type),
+    "tools": tools or [],
+  }
 
 
 # ============================================================================
-# Manager Agent Factory Functions
+# Standard sub-agents shared across managers
 # ============================================================================
 
+def _standard_subagents(
+  domain: str,
+  analysis_tools: Optional[List[Callable]] = None,
+) -> List[Dict[str, Any]]:
+  """Create the 4 standard sub-agents for a manager (Analysis, Synthesis, Writer, Review).
+
+  Args:
+      domain: Domain name
+      analysis_tools: Extra tools for the analysis sub-agent
+  """
+  return [
+    _subagent(domain, "analysis", tools=analysis_tools or [read_corpus_file]),
+    _subagent(domain, "synthesis"),
+    _subagent(domain, "writer"),
+    _subagent(domain, "review"),
+  ]
+
+
+# ============================================================================
+# Manager Agent Factories
+# ============================================================================
 
 def create_drool_manager(
-    model: BaseChatModel,
-    tools: Optional[List[Callable]] = None,
+  model: str,
+  model_provider: Optional[str] = None,
 ) -> Any:
-    """Create Drool Manager Agent with specialized sub-agents.
+  """Create Drool Manager with File Filter + standard sub-agents (5 total).
 
-    The Drool Manager orchestrates sub-agents for:
-    1. File Filter: Identify relevant files using patterns
-    2. Analysis: Extract key requirements from files
-    3. Synthesis: Consolidate and reconcile findings
-    4. Writer: Generate professional specification
-    5. Review: Validate completeness and quality
+  Sub-agents:
+    1. File Filter - regex/keyword-based file identification
+    2. Analysis - extract requirements from filtered files
+    3. Synthesis - consolidate findings
+    4. Writer - generate specification
+    5. Review - validate completeness
+  """
+  subagents = [
+    _subagent("drool", "file_filter", tools=[read_corpus_file, extract_keywords]),
+    *_standard_subagents("drool", analysis_tools=[read_corpus_file]),
+  ]
 
-    Args:
-        model: LLM chat model
-        tools: Optional tool overrides
+  kwargs = {"model": model, "model_provider": model_provider} if model_provider else {"model": model}
 
-    Returns:
-        deepagents Agent instance with sub-agents
-    """
-    if tools is None:
-        tools = [
-            read_file,
-            list_corpus_files,
-            search_files_by_pattern,
-            match_patterns_in_text,
-            extract_keywords,
-        ]
-
-    # Define sub-agents as dictionaries
-    subagents = [
-        create_sub_agent_dict(
-            "drool",
-            "file_filter",
-            tools=[
-                search_files_by_pattern,
-                match_patterns_in_text,
-                extract_keywords,
-                read_file,
-                list_corpus_files,
-            ],
-        ),
-        create_sub_agent_dict(
-            "drool",
-            "analysis",
-            tools=[read_file, list_corpus_files],
-        ),
-        create_sub_agent_dict("drool", "synthesis", tools=[]),
-        create_sub_agent_dict("drool", "writer", tools=[]),
-        create_sub_agent_dict("drool", "review", tools=[]),
-    ]
-
-    agent = create_deep_agent(
-        model=model,
-        tools=tools,
-        system_prompt=PromptLibrary.get_drool_manager_prompt(),
-        subagents=subagents,
-    )
-    return agent
+  return create_deep_agent(
+    **kwargs,
+    tools=[read_corpus_file, extract_keywords],
+    system_prompt=PromptLibrary.get_drool_manager_prompt(),
+    subagents=subagents,
+    backend=FilesystemBackend(root_dir="."),
+  )
 
 
 def create_model_manager(
-    model: BaseChatModel,
-    tools: Optional[List[Callable]] = None,
+  model: str,
+  model_provider: Optional[str] = None,
 ) -> Any:
-    """Create Model Manager Agent with specialized sub-agents.
+  """Create Model Manager with standard sub-agents (4 total).
 
-    Orchestrates sub-agents for data model extraction and documentation:
-    1. Analysis: Extract entities, attributes, relationships
-    2. Synthesis: Consolidate into unified data model
-    3. Writer: Generate professional data model specification
-    4. Review: Validate completeness
+  Parses JSON/JSONL model specs and extracts structured model information.
+  """
+  kwargs = {"model": model, "model_provider": model_provider} if model_provider else {"model": model}
 
-    Args:
-        model: LLM chat model
-        tools: Optional tool overrides
-
-    Returns:
-        deepagents Agent instance with sub-agents
-    """
-    if tools is None:
-        tools = [read_file, list_corpus_files]
-
-    subagents = [
-        create_sub_agent_dict("model", "analysis", tools=[read_file, list_corpus_files]),
-        create_sub_agent_dict("model", "synthesis", tools=[]),
-        create_sub_agent_dict("model", "writer", tools=[]),
-        create_sub_agent_dict("model", "review", tools=[]),
-    ]
-
-    agent = create_deep_agent(
-        model=model,
-        tools=tools,
-        system_prompt=PromptLibrary.get_model_manager_prompt(),
-        subagents=subagents,
-    )
-    return agent
+  return create_deep_agent(
+    **kwargs,
+    tools=[read_corpus_file],
+    system_prompt=PromptLibrary.get_model_manager_prompt(),
+    subagents=_standard_subagents("model"),
+    backend=FilesystemBackend(root_dir="."),
+  )
 
 
 def create_outbound_manager(
-    model: BaseChatModel,
-    tools: Optional[List[Callable]] = None,
+  model: str,
+  model_provider: Optional[str] = None,
 ) -> Any:
-    """Create Outbound Manager Agent with specialized sub-agents.
+  """Create Outbound Manager with standard sub-agents (4 total).
 
-    Orchestrates sub-agents for outbound integration analysis:
-    1. Analysis: Extract API endpoints and external integrations
-    2. Synthesis: Consolidate integration patterns
-    3. Writer: Generate outbound integration specification
-    4. Review: Validate API specifications
+  Processes workbook JSONL sheets for outbound integration data.
+  """
+  kwargs = {"model": model, "model_provider": model_provider} if model_provider else {"model": model}
 
-    Args:
-        model: LLM chat model
-        tools: Optional tool overrides
-
-    Returns:
-        deepagents Agent instance with sub-agents
-    """
-    if tools is None:
-        tools = [read_file, list_corpus_files]
-
-    subagents = [
-        create_sub_agent_dict(
-            "outbound", "analysis", tools=[read_file, list_corpus_files]
-        ),
-        create_sub_agent_dict("outbound", "synthesis", tools=[]),
-        create_sub_agent_dict("outbound", "writer", tools=[]),
-        create_sub_agent_dict("outbound", "review", tools=[]),
-    ]
-
-    agent = create_deep_agent(
-        model=model,
-        tools=tools,
-        system_prompt=PromptLibrary.get_outbound_manager_prompt(),
-        subagents=subagents,
-    )
-    return agent
+  return create_deep_agent(
+    **kwargs,
+    tools=[read_corpus_file],
+    system_prompt=PromptLibrary.get_outbound_manager_prompt(),
+    subagents=_standard_subagents("outbound"),
+    backend=FilesystemBackend(root_dir="."),
+  )
 
 
 def create_transformation_manager(
-    model: BaseChatModel,
-    tools: Optional[List[Callable]] = None,
+  model: str,
+  model_provider: Optional[str] = None,
 ) -> Any:
-    """Create Transformation Manager Agent with specialized sub-agents.
+  """Create Transformation Manager with standard sub-agents (4 total).
 
-    Orchestrates sub-agents for data transformation analysis:
-    1. Analysis: Extract transformation rules and mappings
-    2. Synthesis: Consolidate transformation logic
-    3. Writer: Generate transformation specification
-    4. Review: Validate transformation completeness
+  Processes transformation rules, mappings, and validation logic.
+  """
+  kwargs = {"model": model, "model_provider": model_provider} if model_provider else {"model": model}
 
-    Args:
-        model: LLM chat model
-        tools: Optional tool overrides
-
-    Returns:
-        deepagents Agent instance with sub-agents
-    """
-    if tools is None:
-        tools = [read_file, list_corpus_files]
-
-    subagents = [
-        create_sub_agent_dict(
-            "transformation", "analysis", tools=[read_file, list_corpus_files]
-        ),
-        create_sub_agent_dict("transformation", "synthesis", tools=[]),
-        create_sub_agent_dict("transformation", "writer", tools=[]),
-        create_sub_agent_dict("transformation", "review", tools=[]),
-    ]
-
-    agent = create_deep_agent(
-        model=model,
-        tools=tools,
-        system_prompt=PromptLibrary.get_transformation_manager_prompt(),
-        subagents=subagents,
-    )
-    return agent
+  return create_deep_agent(
+    **kwargs,
+    tools=[read_corpus_file],
+    system_prompt=PromptLibrary.get_transformation_manager_prompt(),
+    subagents=_standard_subagents("transformation"),
+    backend=FilesystemBackend(root_dir="."),
+  )
 
 
 def create_inbound_manager(
-    model: BaseChatModel,
-    tools: Optional[List[Callable]] = None,
+  model: str,
+  model_provider: Optional[str] = None,
 ) -> Any:
-    """Create Inbound Manager Agent with specialized sub-agents.
+  """Create Inbound Manager with standard sub-agents (4 total).
 
-    Orchestrates sub-agents for inbound data integration analysis:
-    1. Analysis: Extract data sources and ingestion requirements
-    2. Synthesis: Consolidate inbound integration patterns
-    3. Writer: Generate inbound integration specification
-    4. Review: Validate data quality and ingestion logic
+  Processes inbound data sources and ingestion requirements.
+  """
+  kwargs = {"model": model, "model_provider": model_provider} if model_provider else {"model": model}
 
-    Args:
-        model: LLM chat model
-        tools: Optional tool overrides
-
-    Returns:
-        deepagents Agent instance with sub-agents
-    """
-    if tools is None:
-        tools = [read_file, list_corpus_files]
-
-    subagents = [
-        create_sub_agent_dict("inbound", "analysis", tools=[read_file, list_corpus_files]),
-        create_sub_agent_dict("inbound", "synthesis", tools=[]),
-        create_sub_agent_dict("inbound", "writer", tools=[]),
-        create_sub_agent_dict("inbound", "review", tools=[]),
-    ]
-
-    agent = create_deep_agent(
-        model=model,
-        tools=tools,
-        system_prompt=PromptLibrary.get_inbound_manager_prompt(),
-        subagents=subagents,
-    )
-    return agent
+  return create_deep_agent(
+    **kwargs,
+    tools=[read_corpus_file],
+    system_prompt=PromptLibrary.get_inbound_manager_prompt(),
+    subagents=_standard_subagents("inbound"),
+    backend=FilesystemBackend(root_dir="."),
+  )
 
 
 def create_reviewer_supervisor(
-    model: BaseChatModel,
-    tools: Optional[List[Callable]] = None,
+  model: str,
+  model_provider: Optional[str] = None,
 ) -> Any:
-    """Create Reviewer/Supervisor Agent with specialized sub-agents.
+  """Create Reviewer/Supervisor with Writer + Review sub-agents + code execution.
 
-    Final authority for BRD quality and completeness. Orchestrates:
-    1. Writer: Synthesize all manager outputs into final BRD
-    2. Review: Validate completeness and detect gaps
+  The reviewer can execute Python code to generate Word documents using python-docx.
+  """
+  subagents = [
+    _subagent("reviewer", "writer"),
+    _subagent("reviewer", "review"),
+  ]
 
-    This agent can request managers to reprocess sections if gaps detected.
+  kwargs = {"model": model, "model_provider": model_provider} if model_provider else {"model": model}
 
-    Args:
-        model: LLM chat model
-        tools: Optional tool overrides
-
-    Returns:
-        deepagents Agent instance with sub-agents
-    """
-    if tools is None:
-        tools = [estimate_tokens_in_text, calculate_cost]
-
-    subagents = [
-        create_sub_agent_dict("reviewer", "writer", tools=[]),
-        create_sub_agent_dict("reviewer", "review", tools=[]),
-    ]
-
-    agent = create_deep_agent(
-        model=model,
-        tools=tools,
-        system_prompt=PromptLibrary.get_reviewer_supervisor_prompt(),
-        subagents=subagents,
-    )
-    return agent
+  return create_deep_agent(
+    **kwargs,
+    tools=[read_corpus_file, estimate_tokens, calculate_cost, execute_python],
+    system_prompt=PromptLibrary.get_reviewer_supervisor_prompt(),
+    subagents=subagents,
+    backend=FilesystemBackend(root_dir="."),
+  )
 
 
 # ============================================================================
-# Convenience Functions
+# Convenience
 # ============================================================================
 
+def create_all_managers(
+  model: str,
+  model_provider: Optional[str] = None,
+) -> Dict[str, Any]:
+  """Create all 6 manager agents.
 
-def create_all_managers(model: BaseChatModel) -> Dict[str, Any]:
-    """Create all 6 manager agents with their sub-agents.
+  Args:
+      model: Model string (e.g. "openai:gpt-4")
+      model_provider: Optional provider override (e.g. "bedrock_converse")
 
-    Args:
-        model: LLM chat model for all agents
-
-    Returns:
-        Dictionary mapping manager names to agent instances
-    """
-    return {
-        "drool": create_drool_manager(model),
-        "model": create_model_manager(model),
-        "outbound": create_outbound_manager(model),
-        "transformation": create_transformation_manager(model),
-        "inbound": create_inbound_manager(model),
-        "reviewer": create_reviewer_supervisor(model),
-    }
+  Returns:
+      Dict mapping manager name to agent instance (CompiledStateGraph)
+  """
+  kwargs = {"model": model, "model_provider": model_provider}
+  return {
+    "drool": create_drool_manager(**kwargs),
+    "model": create_model_manager(**kwargs),
+    "outbound": create_outbound_manager(**kwargs),
+    "transformation": create_transformation_manager(**kwargs),
+    "inbound": create_inbound_manager(**kwargs),
+    "reviewer": create_reviewer_supervisor(**kwargs),
+  }

@@ -1,142 +1,114 @@
-"""Tests for tools."""
+"""Tests for tool functions."""
 
+import os
 import pytest
-from src.tools.file_reader import FileReaderTool
-from src.tools.regex_tool import RegexTool
-from src.tools.token_estimator import TokenEstimatorTool
+from pathlib import Path
+
+from src.tools.corpus_reader import read_corpus_file
+from src.tools.keyword_extractor import extract_keywords
+from src.tools.token_estimator import estimate_tokens, calculate_cost
+from src.tools.code_executor import execute_python
 
 
-class TestFileReaderTool:
-    """Test FileReaderTool."""
+class TestCorpusReader:
+  """Test read_corpus_file."""
 
-    @pytest.mark.asyncio
-    async def test_read_jsonl_file(self, test_corpus_dir):
-        """Test reading JSONL files."""
-        tool = FileReaderTool(corpus_dir=test_corpus_dir)
-        result = await tool.execute(file_path="test.jsonl")
+  def test_read_jsonl(self, test_corpus_dir, monkeypatch):
+    monkeypatch.setenv("CORPUS_DIR", str(test_corpus_dir))
+    from src.config import reset_config
+    reset_config()
 
-        assert result["success"]
-        assert result["format"] == "jsonl"
-        assert len(result["content"]) == 2
-        assert result["content"][0]["id"] == "1"
+    result = read_corpus_file("test.jsonl")
+    assert "JSONL File" in result
+    assert "test content" in result or "id" in result
 
-    @pytest.mark.asyncio
-    async def test_read_markdown_file(self, test_corpus_dir):
-        """Test reading markdown files."""
-        tool = FileReaderTool(corpus_dir=test_corpus_dir)
-        result = await tool.execute(file_path="test.md")
+  def test_read_markdown(self, test_corpus_dir, monkeypatch):
+    monkeypatch.setenv("CORPUS_DIR", str(test_corpus_dir))
+    from src.config import reset_config
+    reset_config()
 
-        assert result["success"]
-        assert result["format"] == "text"
-        assert "# Test" in result["content"]
+    result = read_corpus_file("test.md")
+    assert "# Test" in result
 
-    @pytest.mark.asyncio
-    async def test_read_nonexistent_file(self, test_corpus_dir):
-        """Test reading non-existent file."""
-        tool = FileReaderTool(corpus_dir=test_corpus_dir)
-        result = await tool.execute(file_path="nonexistent.txt")
+  def test_read_text(self, test_corpus_dir, monkeypatch):
+    monkeypatch.setenv("CORPUS_DIR", str(test_corpus_dir))
+    from src.config import reset_config
+    reset_config()
 
-        assert not result["success"]
-        assert "File not found" in result["error"]
+    result = read_corpus_file("test.txt")
+    assert "Plain text content" in result
 
-    def test_list_files(self, test_corpus_dir):
-        """Test listing files in corpus."""
-        tool = FileReaderTool(corpus_dir=test_corpus_dir)
-        files = tool.list_files()
+  def test_read_drl(self, test_corpus_dir, monkeypatch):
+    monkeypatch.setenv("CORPUS_DIR", str(test_corpus_dir))
+    from src.config import reset_config
+    reset_config()
 
-        assert len(files) >= 3
-        assert "test.jsonl" in files
-        assert "test.md" in files
-        assert "test.txt" in files
+    result = read_corpus_file("test.drl")
+    assert "rule" in result
+    assert "test_rule" in result
 
+  def test_read_nonexistent(self, test_corpus_dir, monkeypatch):
+    monkeypatch.setenv("CORPUS_DIR", str(test_corpus_dir))
+    from src.config import reset_config
+    reset_config()
 
-class TestRegexTool:
-    """Test RegexTool."""
-
-    @pytest.mark.asyncio
-    async def test_find_pattern(self):
-        """Test pattern matching."""
-        tool = RegexTool()
-        result = await tool.execute(
-            text="Hello World, this is a test",
-            patterns=[r"[Hh]\w+", r"test"],
-        )
-
-        assert result["total_matches"] >= 2
-        assert len(result["matches"]) > 0
-
-    @pytest.mark.asyncio
-    async def test_case_insensitive(self):
-        """Test case insensitive matching."""
-        tool = RegexTool()
-        text = "HELLO hello Hello"
-        result = await tool.execute(
-            text=text,
-            patterns=[r"hello"],
-            case_insensitive=True,
-        )
-
-        assert result["total_matches"] == 3
-
-    def test_test_pattern(self):
-        """Test pattern existence check."""
-        tool = RegexTool()
-        assert tool.test_pattern("Hello World", r"World")
-        assert not tool.test_pattern("Hello World", r"xyz")
-
-    def test_substitute(self):
-        """Test pattern substitution."""
-        tool = RegexTool()
-        result = tool.substitute(
-            text="Hello World",
-            pattern=r"(\w+) (\w+)",
-            replacement=r"\2 \1",
-        )
-
-        assert result == "World Hello"
+    result = read_corpus_file("nonexistent.txt")
+    assert "ERROR" in result
+    assert "not found" in result
 
 
-class TestTokenEstimatorTool:
-    """Test TokenEstimatorTool."""
+class TestKeywordExtractor:
+  """Test extract_keywords."""
 
-    @pytest.mark.asyncio
-    async def test_estimate_tokens(self):
-        """Test token estimation."""
-        tool = TokenEstimatorTool()
-        result = await tool.execute(
-            text="This is a test string for token estimation."
-        )
+  def test_extract_codes(self):
+    result = extract_keywords("Generate BRD for LC0070 authentication system")
+    assert "LC0070" in result
 
-        assert result["estimated_tokens"] > 0
-        assert result["cost_estimate"] > 0
-        assert result["model"] == "gpt-4"
+  def test_extract_words(self):
+    result = extract_keywords("Generate BRD for authentication system integration")
+    assert "authentication" in result or "integration" in result or "generate" in result
 
-    def test_extract_usage_from_response(self):
-        """Test extracting usage from API response."""
-        tool = TokenEstimatorTool()
-        response = {
-            "usage": {
-                "prompt_tokens": 100,
-                "completion_tokens": 50,
-                "total_tokens": 150,
-            }
-        }
+  def test_empty_input(self):
+    result = extract_keywords("")
+    assert "None" in result or "Extracted" in result
 
-        usage = tool.extract_usage_from_response(response)
 
-        assert usage["prompt_tokens"] == 100
-        assert usage["completion_tokens"] == 50
-        assert usage["total_tokens"] == 150
+class TestTokenEstimator:
+  """Test estimate_tokens and calculate_cost."""
 
-    def test_get_token_cost(self):
-        """Test cost calculation."""
-        tool = TokenEstimatorTool()
-        cost = tool.get_token_cost(
-            input_tokens=1000,
-            output_tokens=500,
-            input_cost_rate=0.003,
-            output_cost_rate=0.006,
-        )
+  def test_estimate_tokens(self, monkeypatch):
+    monkeypatch.setenv("INPUT_COST_PER_1K", "0.003")
+    from src.config import reset_config
+    reset_config()
 
-        # (1000 * 0.003 + 500 * 0.006) / 1000 = (3 + 3) / 1000 = 0.006
-        assert abs(cost - 0.006) < 0.0001
+    result = estimate_tokens("This is a test string for token estimation.")
+    assert "Tokens:" in result
+    assert "cost" in result.lower()
+
+  def test_calculate_cost(self, monkeypatch):
+    monkeypatch.setenv("INPUT_COST_PER_1K", "0.003")
+    monkeypatch.setenv("OUTPUT_COST_PER_1K", "0.006")
+    from src.config import reset_config
+    reset_config()
+
+    result = calculate_cost(input_tokens=1000, output_tokens=500)
+    assert "Input:" in result
+    assert "Output:" in result
+    assert "Total:" in result
+
+
+class TestCodeExecutor:
+  """Test execute_python."""
+
+  def test_execute_simple(self):
+    result = execute_python("print('hello world')")
+    assert "hello world" in result
+    assert "EXIT CODE: 0" in result
+
+  def test_execute_error(self):
+    result = execute_python("raise ValueError('test error')")
+    assert "test error" in result or "ValueError" in result
+
+  def test_execute_timeout(self):
+    result = execute_python("import time; time.sleep(10)", timeout_sec=1)
+    assert "timed out" in result.lower() or "ERROR" in result

@@ -1,0 +1,8 @@
+{"sheet": "FieldMappings", "row": 1, "source_field": "transaction_id", "target_field": "tx_ref", "transformation": "PASSTHROUGH", "description": "Direct mapping of transaction ID"}
+{"sheet": "FieldMappings", "row": 2, "source_field": "amount", "target_field": "tx_amount", "transformation": "ROUND(2)", "description": "Round to 2 decimal places"}
+{"sheet": "FieldMappings", "row": 3, "source_field": "currency", "target_field": "tx_ccy", "transformation": "LOOKUP(currency_map)", "description": "Map to internal currency codes"}
+{"sheet": "FieldMappings", "row": 4, "source_field": "sender_bic", "target_field": "originator_id", "transformation": "BIC_TO_ENTITY(bic_registry)", "description": "Resolve BIC to internal entity ID"}
+{"sheet": "FieldMappings", "row": 5, "source_field": "value_date", "target_field": "settlement_date", "transformation": "DATE_FORMAT(YYYY-MM-DD)", "description": "Normalize date format"}
+{"sheet": "ValidationRules", "row": 1, "rule_id": "VR001", "field": "amount", "rule": "amount > 0 AND amount < 999999999", "severity": "ERROR", "description": "Transaction amount must be positive and within limits"}
+{"sheet": "ValidationRules", "row": 2, "rule_id": "VR002", "field": "currency", "rule": "currency IN (SELECT code FROM valid_currencies)", "severity": "ERROR", "description": "Currency must be a valid ISO code"}
+{"sheet": "ValidationRules", "row": 3, "rule_id": "VR003", "field": "destination_country", "rule": "destination_country NOT IN (SELECT code FROM sanctioned_countries)", "severity": "BLOCK", "description": "Destination must not be a sanctioned country"}
