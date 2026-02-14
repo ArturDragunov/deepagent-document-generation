@@ -178,3 +178,16 @@ def _read_text(path: Path) -> str:
   with open(path, "r", encoding="utf-8") as f:
     content = f.read()
   return content
+
+
+def read_file_as_text(path: Path) -> str:
+  """Read a file by path (e.g. golden BRD). Supports .md and .docx."""
+  if not path.exists():
+    return ""
+  suffix = path.suffix.lower()
+  if suffix == ".docx":
+    return _read_word(path)
+  try:
+    return path.read_text(encoding="utf-8")
+  except Exception as e:
+    return f"ERROR: Failed to read {path}: {e}"

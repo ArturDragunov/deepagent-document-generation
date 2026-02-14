@@ -45,18 +45,13 @@ async def filter_drool_files(
 
   llm = get_chat_model(temperature=0.0).with_structured_output(FileRelevance)
 
-  included = []
-  excluded = []
-
-  for path in file_paths:
+  async def _eval_one(path: str) -> tuple[str, bool, str]:
+    """Return (path, include, reason). On error include=True (conservative)."""
     try:
       content = read_corpus_file(path)
-
       if content.startswith("ERROR:"):
         logger.warning("drool_filter_skip", file=path, reason=content)
-        excluded.append(path)
-        continue
-
+        return (path, False, content)
       prompt = (
         f"You are a file relevance filter. Determine if this file contains "
         f"information relevant to the following user query.\n\n"
@@ -66,20 +61,20 @@ async def filter_drool_files(
         f"Be CONSERVATIVE -- include files that might be even tangentially related. "
         f"Better to include too many than miss something important."
       )
-
       result = await llm.ainvoke(prompt)
-
-      if result.include:
-        included.append(path)
-        logger.info("drool_filter_include", file=path, reason=result.reason)
-      else:
-        excluded.append(path)
-        logger.info("drool_filter_exclude", file=path, reason=result.reason)
-
+      return (path, result.include, result.reason)
     except Exception as e:
-      # On error, be conservative and include the file
       logger.warning("drool_filter_error", file=path, error=str(e))
-      included.append(path)
+      return (path, True, str(e))
+
+  outcomes = await asyncio.gather(*(_eval_one(p) for p in file_paths))
+  included = [p for p, inc, _ in outcomes if inc]
+  excluded = [p for p, inc, _ in outcomes if not inc]
+  for path, inc, reason in outcomes:
+    if inc:
+      logger.info("drool_filter_include", file=path, reason=reason)
+    else:
+      logger.info("drool_filter_exclude", file=path, reason=reason)
 
   logger.info(
     "drool_filter_complete",

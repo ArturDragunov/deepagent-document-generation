@@ -152,8 +152,8 @@ class BRDOrchestrator:
       execution_id=str(uuid.uuid4()),
     )
 
-    # Clear previous agent outputs
-    clear_agent_outputs()
+    # Clear previous agent outputs (offload sync I/O)
+    await asyncio.to_thread(clear_agent_outputs)
     self._completed_agents = []
 
     # Categorize files: drool (.drl) vs non-drool
@@ -185,7 +185,7 @@ class BRDOrchestrator:
       # Phase 1: Drool + Model in parallel (Model runs per workbook group)
       logger.info("phase_1_parallel", agents=["drool", "model"])
       drool_msg, model_msg = await self._run_parallel_phase(filtered_drool)
-      self._record_and_save(drool_msg, "drool")
+      await self._record_and_save(drool_msg, "drool")
       # Model output already saved and messages added by _run_manager_grouped
 
       # Phase 2: Sequential cascade -- each runs per workbook group, merges markdown
@@ -197,7 +197,7 @@ class BRDOrchestrator:
       # Phase 3: Reviewer with feedback loop
       logger.info("phase_3_reviewer")
       reviewer_msg = await self._run_reviewer_loop()
-      self._record_and_save(reviewer_msg, "reviewer")
+      await self._record_and_save(reviewer_msg, "reviewer")
 
       # Finalize
       elapsed = self.context.get_elapsed_time_sec()
@@ -256,14 +256,15 @@ class BRDOrchestrator:
   async def _run_manager_grouped(
     self, name: str, files: List[str],
   ) -> Optional[AgentMessage]:
-    """Run a manager per workbook group (capped size); merge markdown; optionally consolidate with golden BRD."""
+    """Run a manager per workbook group (capped size) in parallel; merge markdown; optionally consolidate with golden BRD."""
     groups = group_files_by_workbook(
       files,
       self.config.file_group_delimiter,
       max_per_group=self.config.max_files_per_group,
     )
-    accumulated: List[str] = []
-    last_msg: Optional[AgentMessage] = None
+    if not groups:
+      return None
+
     for idx, group in enumerate(groups):
       logger.info(
         "phase_group_step",
@@ -272,26 +273,36 @@ class BRDOrchestrator:
         total_groups=len(groups),
         files_in_group=len(group),
       )
-      msg = await self._execute_manager(name, file_override=group)
-      if msg:
-        self.context.add_message(msg)
-        last_msg = msg
-        if msg.status == MessageStatus.SUCCESS and msg.markdown_content:
-          accumulated.append(msg.markdown_content)
+
+    tasks = [self._execute_manager(name, file_override=group) for group in groups]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    accumulated: List[str] = []
+    last_msg: Optional[AgentMessage] = None
+    for idx, r in enumerate(results):
+      if isinstance(r, Exception):
+        logger.error("manager_group_failed", manager=name, group=idx + 1, error=str(r))
+        continue
+      if r:
+        self.context.add_message(r)
+        last_msg = r
+        if r.status == MessageStatus.SUCCESS and r.markdown_content:
+          accumulated.append(r.markdown_content)
+
     if accumulated:
       merged = "\n\n---\n\n".join(accumulated)
-      save_agent_output(name, merged)
+      await asyncio.to_thread(save_agent_output, name, merged)
       self._completed_agents.append(name)
       logger.info("message_recorded", agent=name, output_chars=sum(len(p) for p in accumulated))
       if self.config.consolidate_sections and len(accumulated) > 1:
         consolidated_msg = await self._run_consolidation(name, merged)
         if consolidated_msg and consolidated_msg.status == MessageStatus.SUCCESS and consolidated_msg.markdown_content:
-          save_agent_output(name, consolidated_msg.markdown_content)
+          await asyncio.to_thread(save_agent_output, name, consolidated_msg.markdown_content)
           logger.info("consolidation_done", agent=name, output_chars=len(consolidated_msg.markdown_content))
     return last_msg
 
   def _load_golden_brd(self) -> str:
-    """Load golden BRD reference content for consolidation prompts."""
+    """Load golden BRD reference content for consolidation prompts (.md or .docx)."""
     if not self._golden_brd_path:
       return ""
     p = Path(self._golden_brd_path)
@@ -299,7 +310,8 @@ class BRDOrchestrator:
       logger.warning("golden_brd_not_found", path=str(p))
       return ""
     try:
-      return p.read_text(encoding="utf-8")
+      from src.tools.corpus_reader import read_file_as_text
+      return read_file_as_text(p)
     except Exception as e:
       logger.warning("golden_brd_read_failed", path=str(p), error=str(e))
       return ""
@@ -322,7 +334,7 @@ class BRDOrchestrator:
 
   async def _run_consolidation(self, name: str, merged_markdown: str) -> Optional[AgentMessage]:
     """One short run: consolidate merged sections into one coherent doc using golden BRD. No file reads."""
-    golden = self._load_golden_brd()
+    golden = await asyncio.to_thread(self._load_golden_brd)
     prompt = self._build_consolidation_prompt(name, merged_markdown, golden)
     logger.info("consolidation_start", manager=name, merged_len=len(merged_markdown))
     return await self._execute_manager(name, prebuilt_message=prompt, file_override=[])
@@ -518,7 +530,7 @@ class BRDOrchestrator:
 
       logger.info("reprocessing_manager", agent_id=agent_id, gaps=len(agent_gaps))
       msg = await self._execute_manager(agent_id, feedback=request)
-      self._record_and_save(msg, agent_id)
+      await self._record_and_save(msg, agent_id)
 
   # ------------------------------------------------------------------
   # Prompt building
@@ -603,14 +615,14 @@ class BRDOrchestrator:
       manager_name, in_t, out_t, cost_estimate=cost,
     )
 
-  def _record_and_save(self, msg: Optional[AgentMessage], name: str) -> None:
+  async def _record_and_save(self, msg: Optional[AgentMessage], name: str) -> None:
     """Record message to context AND save full output to file for downstream agents."""
     if msg:
       self.context.add_message(msg)
 
-      # Save full markdown output to file (no truncation)
+      # Save full markdown output to file (no truncation); offload sync I/O
       if msg.status == MessageStatus.SUCCESS and msg.markdown_content:
-        save_agent_output(name, msg.markdown_content)
+        await asyncio.to_thread(save_agent_output, name, msg.markdown_content)
         self._completed_agents.append(name)
         logger.info(
           "message_recorded",

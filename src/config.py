@@ -44,7 +44,8 @@ class Config:
 
   @property
   def corpus_dir(self) -> Path:
-    path = Path(os.getenv("CORPUS_DIR", "example_data/corpus"))
+    """Root for corpus: scan all subdirs (Inbound, Outbound, Transformation, Drool, RTC, Model)."""
+    path = Path(os.getenv("CORPUS_DIR", "Bedrock"))
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -71,7 +72,14 @@ class Config:
 
   @property
   def golden_brd_path(self) -> Path:
-    return Path(os.getenv("GOLDEN_BRD_PATH", "example_data/golden_brd.md"))
+    return Path(os.getenv("GOLDEN_BRD_PATH", "Bedrock/GoldenBRD.docx"))
+
+  @property
+  def reviewer_system_prompt_path(self) -> Optional[Path]:
+    """Optional path to reviewer system prompt (e.g. Bedrock/system_prompt.txt)."""
+    raw = os.getenv("REVIEWER_SYSTEM_PROMPT_PATH", "Bedrock/system_prompt.txt")
+    p = Path(raw)
+    return p if p.exists() else None
 
   @property
   def max_file_size_mb(self) -> int:
@@ -96,6 +104,11 @@ class Config:
   # =================================================================
   # Token Tracking & Cost
   # =================================================================
+
+  @property
+  def generate_brd_report(self) -> bool:
+    """If True, write outputs/brd_report.json (tokens, cost, warnings). If False, skip report."""
+    return os.getenv("GENERATE_BRD_REPORT", "false").lower() == "true"
 
   @property
   def track_tokens(self) -> bool:

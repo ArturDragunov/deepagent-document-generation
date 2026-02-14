@@ -116,14 +116,20 @@ def create_reviewer_supervisor(
   """Create Reviewer/Supervisor -- flat agent with code execution for .docx.
 
   Synthesizes all manager outputs, validates completeness, generates final
-  Word document via execute_python tool.
+  Word document via execute_python tool. If REVIEWER_SYSTEM_PROMPT_PATH exists,
+  its content is prepended to the default reviewer prompt.
   """
+  from src.config import get_config
   kwargs = _model_kwargs(model, model_provider)
-
+  prompt = PromptLibrary.get_reviewer_supervisor_prompt()
+  config = get_config()
+  if config.reviewer_system_prompt_path:
+    custom = config.reviewer_system_prompt_path.read_text(encoding="utf-8").strip()
+    prompt = f"{custom}\n\n{prompt}"
   return create_deep_agent(
     **kwargs,
     tools=[read_corpus_file, read_agent_output, list_agent_outputs, estimate_tokens, calculate_cost, execute_python],
-    system_prompt=PromptLibrary.get_reviewer_supervisor_prompt(),
+    system_prompt=prompt,
   )
 
 

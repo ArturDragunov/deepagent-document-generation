@@ -49,6 +49,7 @@ class ExecutionLogger(BaseCallbackHandler):
     self._llm_call_count = 0
     self._tool_call_count = 0
     self._token_callback = token_callback
+    self._run_prompt_len: Dict[UUID, int] = {}
 
   def on_llm_start(
     self,
@@ -60,13 +61,15 @@ class ExecutionLogger(BaseCallbackHandler):
     **kwargs: Any,
   ) -> None:
     self._llm_call_count += 1
+    prompt_len = sum(len(p) for p in prompts) if prompts else 0
+    self._run_prompt_len[run_id] = prompt_len
     prompt_preview = (prompts[0][:200] + "...") if prompts and len(prompts[0]) > 200 else (prompts[0] if prompts else "")
     logger.info(
       "llm_call_started",
       manager=self.manager_name,
       call_number=self._llm_call_count,
       run_id=str(run_id),
-      prompt_len=sum(len(p) for p in prompts) if prompts else 0,
+      prompt_len=prompt_len,
       prompt_preview=prompt_preview.replace("\n", " "),
     )
 
@@ -88,6 +91,14 @@ class ExecutionLogger(BaseCallbackHandler):
       for g in generations:
         if g and g[0].text:
           output_len += len(g[0].text)
+    if input_tokens is None or output_tokens is None:
+      prompt_len = self._run_prompt_len.pop(run_id, 0)
+      if input_tokens is None:
+        input_tokens = max(0, prompt_len // 4)
+      if output_tokens is None:
+        output_tokens = max(0, output_len // 4)
+    else:
+      self._run_prompt_len.pop(run_id, None)
     if self._token_callback:
       try:
         self._token_callback(

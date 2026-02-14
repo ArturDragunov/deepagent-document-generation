@@ -26,7 +26,7 @@ pip install -e ".[dev]"
 python -m src.main --query "Create BRD for LC0070 payment authorization"
 ```
 
-**Outputs:** `outputs/agent_outputs/*.md` (per-agent markdown), `outputs/brd_report.json` (tokens, cost, files, warnings), and the final `.docx` when the Reviewer writes it (e.g. via `execute_python`).
+**Outputs:** `outputs/agent_outputs/*.md` (per-agent markdown), optional `outputs/brd_report.json` when `GENERATE_BRD_REPORT=true` (tokens, cost, files, warnings), and the final `.docx` when the Reviewer writes it (e.g. via `execute_python`).
 
 ## Configuration
 
@@ -38,11 +38,11 @@ LLM_MODEL=openai:gpt-4
 # Ollama:  LLM_MODEL=ollama:neural-chat
 ```
 
-**Paths:** `CORPUS_DIR` (default `example_data/corpus`), `OUTPUT_DIR` (default `outputs`), `GOLDEN_BRD_PATH` (default `example_data/golden_brd.md`) for consolidation reference.
+**Paths:** `CORPUS_DIR` (default `Bedrock` — root containing subdirs Inbound, Outbound, Transformation, Drool, RTC, Model), `OUTPUT_DIR` (default `outputs`), `GOLDEN_BRD_PATH` (default `Bedrock/GoldenBRD.docx`) for consolidation. Optional `REVIEWER_SYSTEM_PROMPT_PATH` (e.g. `Bedrock/system_prompt.txt`) prepended to reviewer prompt.
 
 **Scaling / consolidation:** `MAX_FILES_PER_GROUP` (default `8`), `FILE_GROUP_DELIMITER` (default `_sheet`), `CONSOLIDATE_SECTIONS` (default `true`). `REVIEWER_TIMEOUT_SEC` (default `600`), `AGENT_TIMEOUT_SEC` (default `300`).
 
-**Cost:** Token usage is recorded and reported in `brd_report.json` and logs. Optional: `INPUT_COST_PER_1K`, `OUTPUT_COST_PER_1K`, `TRACK_TOKENS`.
+**Cost:** Token usage is tracked when `TRACK_TOKENS=true`; when `GENERATE_BRD_REPORT=true` the report is written to `outputs/brd_report.json`. Optional: `INPUT_COST_PER_1K`, `OUTPUT_COST_PER_1K`. If the LLM response omits token counts, a char-based estimate is used.
 
 ## Project Structure
 

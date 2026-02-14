@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 
-from src.tools.corpus_reader import read_corpus_file
+from src.tools.corpus_reader import read_corpus_file, read_file_as_text
 from src.tools.token_estimator import estimate_tokens, calculate_cost
 from src.tools.code_executor import execute_python
 
@@ -53,6 +53,31 @@ class TestCorpusReader:
     result = read_corpus_file("nonexistent.txt")
     assert "ERROR" in result
     assert "not found" in result
+
+
+class TestReadFileAsText:
+  """Test read_file_as_text (golden BRD .md / .docx)."""
+
+  def test_nonexistent_returns_empty(self, tmp_path):
+    assert read_file_as_text(tmp_path / "missing.md") == ""
+
+  def test_read_md(self, test_corpus_dir):
+    path = test_corpus_dir / "test.md"
+    result = read_file_as_text(path)
+    assert "# Test" in result
+    assert "Test markdown content" in result
+
+  def test_read_docx(self, tmp_path):
+    try:
+      from docx import Document
+    except ImportError:
+      pytest.skip("python-docx not installed")
+    docx_path = tmp_path / "sample.docx"
+    doc = Document()
+    doc.add_paragraph("Golden BRD paragraph.")
+    doc.save(docx_path)
+    result = read_file_as_text(docx_path)
+    assert "Golden BRD" in result or "paragraph" in result
 
 
 class TestTokenEstimator:

@@ -140,3 +140,39 @@ class TestGroupFilesByWorkbook:
     assert len(got[0]) == 8
     assert len(got[1]) == 8
     assert len(got[2]) == 4
+
+
+@pytest.mark.asyncio
+async def test_run_pipeline_success_with_mocked_managers(test_output_dir, monkeypatch):
+  """Full pipeline run with mocked LLM agents (no real API calls)."""
+  monkeypatch.setenv("LLM_MODEL", "openai:gpt-4")
+  monkeypatch.setenv("OUTPUT_DIR", str(test_output_dir))
+  from src.config import reset_config
+  reset_config()
+
+  from src.models import MessageStatus
+  from src.orchestrator import BRDOrchestrator
+
+  mock_invoke_result = {"messages": [MagicMock(content="# BRD section")]}
+  mock_agent = MagicMock()
+  mock_agent.ainvoke = AsyncMock(return_value=mock_invoke_result)
+  mock_managers = {
+    "drool": mock_agent,
+    "model": mock_agent,
+    "outbound": mock_agent,
+    "transformation": mock_agent,
+    "inbound": mock_agent,
+    "reviewer": mock_agent,
+  }
+
+  with patch.object(BRDOrchestrator, "_filter_drool_files", new_callable=AsyncMock, return_value=[]):
+    with patch("src.orchestrator.create_all_managers", return_value=mock_managers):
+      orchestrator = BRDOrchestrator()
+      result = await orchestrator.run_pipeline(
+        user_query="Create BRD for LC0070 payment auth",
+        corpus_files=["Outbound/spec.md", "Transformation/mappings.jsonl"],
+      )
+
+  assert result.status == MessageStatus.SUCCESS
+  assert result.execution_id
+  assert len(result.all_messages) >= 1

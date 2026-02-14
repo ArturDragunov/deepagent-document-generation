@@ -58,7 +58,7 @@ Examples:
   corpus_files = [
     str(f.relative_to(corpus_dir))
     for f in corpus_dir.rglob("*")
-    if f.is_file()
+    if f.is_file() and f.parent != corpus_dir
   ]
 
   logger.info("corpus_scanned", files=len(corpus_files), path=str(corpus_dir))
@@ -89,21 +89,26 @@ Examples:
       total_cost_estimate=summary.get("total_cost_estimate", 0),
     )
 
-    report = {
-      "tokens_used": summary.get("total_estimated_tokens", 0),
-      "cost_estimate": summary.get("total_cost_estimate", 0),
-      "files_included": corpus_files,
-      "warnings": result.warnings,
-      "execution_id": result.execution_id,
-      "status": result.status.value,
-      "execution_time_sec": round(result.execution_time_sec, 2),
-    }
-    report_path = output_dir / "brd_report.json"
-    try:
-      report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-      logger.info("report_written", path=str(report_path))
-    except Exception as e:
-      logger.warning("report_write_failed", path=str(report_path), error=str(e))
+    if config.generate_brd_report:
+      report = {
+        "tokens_used": summary.get("total_estimated_tokens", 0),
+        "cost_estimate": summary.get("total_cost_estimate", 0),
+        "files_included": corpus_files,
+        "warnings": result.warnings,
+        "execution_id": result.execution_id,
+        "status": result.status.value,
+        "execution_time_sec": round(result.execution_time_sec, 2),
+      }
+      report_path = output_dir / "brd_report.json"
+
+      def _write_report() -> None:
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+      try:
+        await asyncio.to_thread(_write_report)
+        logger.info("report_written", path=str(report_path))
+      except Exception as e:
+        logger.warning("report_write_failed", path=str(report_path), error=str(e))
 
     if result.warnings:
       for w in result.warnings:
